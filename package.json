@@ -1,0 +1,92 @@
+{
+  "name": "deepseek-harness-desktop",
+  "version": "0.1.2",
+  "private": true,
+  "author": "DeepSeek Harness Desktop contributors",
+  "description": "A supervised Windows desktop host for the official DeepSeek Harness Web UI.",
+  "type": "module",
+  "main": "dist-electron/main/index.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "build": "vite build && tsc -p tsconfig.electron.json",
+    "prepare:runtime": "tsx scripts/prepare-runtime.ts",
+    "pack": "npm run prepare:runtime && npm run build && electron-builder --win nsis",
+    "pack:dir": "npm run prepare:runtime && npm run build && electron-builder --win dir"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-anonymous-user-id": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-fs": "0.1.1-rc.2",
+    "@deepseek-ai/cordis-plugin-group": "1.0.2",
+    "@deepseek-ai/dsh-code-runtime": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-compaction": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-invariants": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-output-retention": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-scope": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-telemetry": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-title-llm": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-shell": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-spill": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-subagent-in-process-driver": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-timeout": "0.1.1-rc.2",
+    "@vitejs/plugin-react": "6.1.1",
+    "lucide-react": "1.38.0",
+    "pnpm": "11.24.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "vite": "8.2.2",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "concurrently": "10.0.5",
+    "cross-env": "10.1.0",
+    "electron": "44.1.0",
+    "electron-builder": "26.15.3",
+    "jsdom": "30.0.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wait-on": "9.1.0"
+  },
+  "build": {
+    "appId": "com.deepseek.harness.desktop",
+    "productName": "DeepSeek Harness Desktop",
+    "npmRebuild": false,
+    "asar": false,
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/node",
+        "to": "node",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
