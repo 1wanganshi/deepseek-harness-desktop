@@ -1,0 +1,60 @@
+name: Windows desktop build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build NSIS installer
+        run: pnpm run pack
+
+      - name: Verify installer artifact
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -LiteralPath release -Filter '*-Setup.exe' | Select-Object -First 1
+          if ($null -eq $installer -or $installer.Length -le 0) {
+            throw 'A non-empty NSIS installer was not produced.'
+          }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+          "Installer: $($installer.Name)"
+          "SHA256: $hash"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-desktop-windows
+          path: |
+            release/*-Setup.exe
+            release/*-Setup.exe.blockmap
+          if-no-files-found: error

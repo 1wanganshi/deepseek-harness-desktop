@@ -2,6 +2,7 @@
   "name": "deepseek-harness-desktop",
   "version": "0.2.1",
   "private": true,
+  "packageManager": "pnpm@11.24.0",
   "author": "DeepSeek Harness Desktop contributors",
   "description": "A supervised Windows desktop host for the official DeepSeek Harness Web UI.",
   "type": "module",
