@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, ArrowUpCircle, ChevronUp, CircleAlert, CircleCheck, Cpu, ExternalLink, RefreshCw, Wrench } from 'lucide-react'
-import type { DesktopApi, PluginStatus, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
+import type { DesktopApi, PluginStatus, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
 import { createStatusPanelTransition } from './status-panel-transition.js'
 import './styles.css'
 
@@ -36,11 +36,20 @@ const previewDiagnostics: RuntimeDiagnostics = {
   },
 }
 
+const previewRepairReport: RepairReport = {
+  startedAt: new Date().toISOString(),
+  finishedAt: new Date().toISOString(),
+  knownErrors: [],
+  checks: [],
+  fixedCount: 0,
+  state: previewDiagnostics.state,
+}
+
 const previewApi: DesktopApi = {
   getSnapshot: async () => previewDiagnostics,
   openDiagnostics: async () => undefined,
   setStatusPanelExpanded: async () => undefined,
-  repairRuntime: async () => previewDiagnostics.state,
+  repairRuntime: async () => previewRepairReport,
   restartDesktop: async () => undefined,
   checkForUpdate: async () => ({ currentVersion: '0.1.1-rc.2', latestVersion: null, updateAvailable: false, checkedAt: new Date().toISOString(), error: null }),
   installUpdate: async () => ({ currentVersion: '0.1.1-rc.2', latestVersion: '0.1.1-rc.2', updateAvailable: false, checkedAt: new Date().toISOString(), error: null }),
@@ -48,6 +57,7 @@ const previewApi: DesktopApi = {
   onRuntimeState: () => () => undefined,
   onUpdateState: () => () => undefined,
   onStatusPanelExpanded: () => () => undefined,
+  onRepairProgress: () => () => undefined,
 }
 
 const desktopApi = window.desktopApi ?? previewApi

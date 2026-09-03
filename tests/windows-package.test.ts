@@ -20,7 +20,7 @@ describe('Windows desktop distribution metadata', () => {
       }
     }
 
-    expect(manifest.version).toBe('0.2.0')
+    expect(manifest.version).toBe('0.2.1')
     expect(manifest.build.appId).toBe('com.deepseek.harness.desktop')
     expect(manifest.build.productName).toBe('DeepSeek Harness Desktop')
     expect(manifest.build.win.icon).toBe('resources/icon.ico')

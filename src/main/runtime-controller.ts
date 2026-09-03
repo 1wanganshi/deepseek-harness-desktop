@@ -55,6 +55,9 @@ export class RuntimeController {
   private runtime: ResolvedRuntime | null = null
   private stoppedByUser = false
   private recovering = false
+  // Bumped on every explicit start/stop so a stale scheduled recovery from a
+  // previous lifecycle can never boot a second child behind an active boot.
+  private lifecycleGeneration = 0
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private heartbeatFailures = 0
   private state: RuntimeState = {
@@ -83,6 +86,7 @@ export class RuntimeController {
     this.stoppedByUser = false
     this.recovering = false
     this.recovery.markHealthy()
+    this.lifecycleGeneration += 1
     this.clearHeartbeat()
     this.setState({ status: 'starting', lastError: null, recoveryAttempt: 0 })
     try {
@@ -103,6 +107,7 @@ export class RuntimeController {
   async stop(): Promise<void> {
     this.stoppedByUser = true
     this.recovering = false
+    this.lifecycleGeneration += 1
     this.clearHeartbeat()
     const child = this.child
     this.child = null
@@ -244,9 +249,10 @@ export class RuntimeController {
       return
     }
     this.recovering = true
+    const scheduledGeneration = this.lifecycleGeneration
     this.setState({ status: 'recovering', recoveryAttempt: this.recovery.attemptCount })
     void this.sleep(delay).then(async () => {
-      if (this.stoppedByUser) return
+      if (this.stoppedByUser || scheduledGeneration !== this.lifecycleGeneration) return
       try {
         await this.boot()
       } catch (error) {

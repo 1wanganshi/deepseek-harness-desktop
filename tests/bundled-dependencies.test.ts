@@ -34,4 +34,28 @@ describe('bundled dependency repair', () => {
 
     await expect(repairBundledDependencies({ workerPath, install })).resolves.toBe(false)
   })
+
+  it('repairs the worker peer dependency when it is missing from the app', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-bundled-peer-repair-'))
+    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
+    const workflowPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow')
+    await mkdir(join(workerPath, 'lib'), { recursive: true })
+    await writeFile(join(workerPath, 'package.json'), '{}')
+    await writeFile(join(workerPath, 'lib', 'index.js'), '')
+    const commands: string[][] = []
+
+    const repaired = await repairBundledDependencies({
+      workerPath,
+      requiredPackagePaths: [workflowPath],
+      install: async args => {
+        commands.push(args)
+        await mkdir(join(workflowPath, 'lib'), { recursive: true })
+        await writeFile(join(workflowPath, 'package.json'), '{}')
+        await writeFile(join(workflowPath, 'lib', 'index.js'), '')
+      },
+    })
+
+    expect(repaired).toBe(true)
+    expect(commands).toEqual([['install', '--prod', '--no-frozen-lockfile']])
+  })
 })

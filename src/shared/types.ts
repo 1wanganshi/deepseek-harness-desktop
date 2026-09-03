@@ -24,6 +24,24 @@ export interface RuntimeDiagnostics {
   migration: LegacyMigrationStatus
 }
 
+export type RepairCheckStatus = 'pending' | 'ok' | 'fixed' | 'failed' | 'skipped'
+
+export interface RepairCheck {
+  id: string
+  label: string
+  status: RepairCheckStatus
+  detail: string | null
+}
+
+export interface RepairReport {
+  startedAt: string
+  finishedAt: string | null
+  knownErrors: string[]
+  checks: RepairCheck[]
+  fixedCount: number
+  state: RuntimeState
+}
+
 export interface UpdateStatus {
   currentVersion: string
   latestVersion: string | null
@@ -44,7 +62,7 @@ export interface DesktopApi {
   getSnapshot: () => Promise<RuntimeDiagnostics>
   openDiagnostics: () => Promise<void>
   setStatusPanelExpanded: (expanded: boolean) => Promise<void>
-  repairRuntime: () => Promise<RuntimeState>
+  repairRuntime: () => Promise<RepairReport>
   restartDesktop: () => Promise<void>
   checkForUpdate: () => Promise<UpdateStatus>
   installUpdate: () => Promise<UpdateStatus>
@@ -52,4 +70,5 @@ export interface DesktopApi {
   onRuntimeState: (listener: (state: RuntimeState) => void) => () => void
   onUpdateState: (listener: (status: UpdateStatus) => void) => () => void
   onStatusPanelExpanded: (listener: (expanded: boolean) => void) => () => void
+  onRepairProgress: (listener: (report: RepairReport) => void) => () => void
 }

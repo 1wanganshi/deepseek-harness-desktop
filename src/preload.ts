@@ -1,11 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopApi, PluginStatus, RuntimeDiagnostics, RuntimeState, UpdateStatus } from './shared/types.js'
+import type { DesktopApi, PluginStatus, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from './shared/types.js'
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke('desktop:get-snapshot') as Promise<RuntimeDiagnostics>,
   openDiagnostics: () => ipcRenderer.invoke('desktop:open-diagnostics') as Promise<void>,
   setStatusPanelExpanded: (expanded: boolean) => ipcRenderer.invoke('desktop:set-status-panel-expanded', expanded) as Promise<void>,
-  repairRuntime: () => ipcRenderer.invoke('desktop:repair-runtime') as Promise<RuntimeState>,
+  repairRuntime: () => ipcRenderer.invoke('desktop:repair-runtime') as Promise<RepairReport>,
   restartDesktop: () => ipcRenderer.invoke('desktop:restart-desktop') as Promise<void>,
   checkForUpdate: () => ipcRenderer.invoke('desktop:check-update') as Promise<UpdateStatus>,
   installUpdate: () => ipcRenderer.invoke('desktop:install-update') as Promise<UpdateStatus>,
@@ -24,6 +24,11 @@ const api: DesktopApi = {
     const callback = (_event: Electron.IpcRendererEvent, expanded: boolean) => listener(expanded)
     ipcRenderer.on('desktop:status-panel-expanded', callback)
     return () => ipcRenderer.removeListener('desktop:status-panel-expanded', callback)
+  },
+  onRepairProgress: (listener) => {
+    const callback = (_event: Electron.IpcRendererEvent, report: RepairReport) => listener(report)
+    ipcRenderer.on('desktop:repair-progress', callback)
+    return () => ipcRenderer.removeListener('desktop:repair-progress', callback)
   },
 }
 

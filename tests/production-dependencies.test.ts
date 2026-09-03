@@ -28,6 +28,7 @@ describe('production DSH dependencies', () => {
       '@deepseek-ai/dsh-spill',
       '@deepseek-ai/dsh-subagent-in-process-driver',
       '@deepseek-ai/dsh-timeout',
+      '@deepseek-ai/dsh-workflow',
       '@deepseek-ai/dsh-workflow-worker-thread',
     ]
 
