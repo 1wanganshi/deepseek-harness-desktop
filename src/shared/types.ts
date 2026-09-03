@@ -51,4 +51,5 @@ export interface DesktopApi {
   syncPlugins: () => Promise<PluginStatus>
   onRuntimeState: (listener: (state: RuntimeState) => void) => () => void
   onUpdateState: (listener: (status: UpdateStatus) => void) => () => void
+  onStatusPanelExpanded: (listener: (expanded: boolean) => void) => () => void
 }

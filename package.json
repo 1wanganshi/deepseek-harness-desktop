@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "author": "DeepSeek Harness Desktop contributors",
   "description": "A supervised Windows desktop host for the official DeepSeek Harness Web UI.",
@@ -34,6 +34,7 @@
     "@deepseek-ai/dsh-spill": "0.1.1-rc.2",
     "@deepseek-ai/dsh-subagent-in-process-driver": "0.1.1-rc.2",
     "@deepseek-ai/dsh-timeout": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-workflow-worker-thread": "0.1.1-rc.2",
     "@vitejs/plugin-react": "6.1.1",
     "lucide-react": "1.38.0",
     "pnpm": "11.24.0",
@@ -62,12 +63,19 @@
     "npmRebuild": false,
     "asar": false,
     "files": [
-      "dist/**",
+      "dist-renderer/**",
       "dist-electron/**",
       "package.json",
       "node_modules/**"
     ],
+    "directories": {
+      "output": "release"
+    },
     "extraResources": [
+      {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      },
       {
         "from": "resources/node",
         "to": "node",
@@ -77,6 +85,7 @@
       }
     ],
     "win": {
+      "icon": "resources/icon.ico",
       "target": [
         "nsis"
       ],
@@ -86,7 +95,11 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "DeepSeek Harness Desktop",
+      "uninstallDisplayName": "DeepSeek Harness Desktop",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   }
 }

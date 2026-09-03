@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Activity, ArrowUpCircle, ChevronUp, CircleAlert, CircleCheck, Cpu, ExternalLink, RefreshCw, Wrench } from 'lucide-react'
 import type { DesktopApi, PluginStatus, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
+import { createStatusPanelTransition } from './status-panel-transition.js'
 import './styles.css'
 
 const fallbackState: RuntimeState = {
@@ -46,6 +47,7 @@ const previewApi: DesktopApi = {
   syncPlugins: async () => ({ profilePath: previewDiagnostics.dshHome, names: [], canSync: true, lastSyncedAt: new Date().toISOString(), error: null }),
   onRuntimeState: () => () => undefined,
   onUpdateState: () => () => undefined,
+  onStatusPanelExpanded: () => () => undefined,
 }
 
 const desktopApi = window.desktopApi ?? previewApi
@@ -70,11 +72,27 @@ function ControlBar(): ReactElement {
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
+  const panelTransition = useRef<ReturnType<typeof createStatusPanelTransition> | null>(null)
+
+  if (panelTransition.current === null) {
+    panelTransition.current = createStatusPanelTransition(
+      nextExpanded => desktopApi.setStatusPanelExpanded(nextExpanded),
+      nextExpanded => setExpanded(nextExpanded),
+    )
+  }
+
+  const requestExpanded = (nextExpanded: boolean): void => {
+    const transition = panelTransition.current
+    if (transition === null) return
+    void transition(nextExpanded).catch(error => {
+      setNotice(error instanceof Error ? error.message : String(error))
+    })
+  }
 
   useEffect(() => {
     void desktopApi.getSnapshot().then(snapshot => {
       setState(snapshot.state)
-      setExpanded(snapshot.state.status !== 'running')
+      if (snapshot.state.status !== 'running') requestExpanded(true)
       setUpdate({
         currentVersion: snapshot.state.version,
         latestVersion: snapshot.latestVersion,
@@ -83,13 +101,17 @@ function ControlBar(): ReactElement {
         error: null,
       })
     }).catch(() => setNotice('控制面暂时无法读取运行状态'))
-    return desktopApi.onRuntimeState(nextState => {
+    const unsubscribeRuntime = desktopApi.onRuntimeState(nextState => {
       setState(nextState)
-      if (nextState.status !== 'running') setExpanded(true)
+      if (nextState.status !== 'running') requestExpanded(true)
     })
+    const unsubscribePanel = desktopApi.onStatusPanelExpanded(nextExpanded => setExpanded(nextExpanded))
+    return () => {
+      unsubscribeRuntime()
+      unsubscribePanel()
+    }
   }, [])
   useEffect(() => desktopApi.onUpdateState(setUpdate), [])
-  useEffect(() => { void desktopApi.setStatusPanelExpanded(expanded) }, [expanded])
 
   const runAction = async (key: string, action: () => Promise<unknown>, message: string) => {
     setBusy(key)
@@ -105,11 +127,11 @@ function ControlBar(): ReactElement {
   }
 
   const hasProblem = state.status === 'error' || state.status === 'recovering'
-  const toggleLabel = expanded ? '隐藏运行状态' : '查看运行状态'
+  const toggleLabel = expanded ? '隐藏状态栏' : '打开状态栏'
   return <>
-    {!expanded && <button className={`status-launcher ${statusTone(state)} ${hasProblem ? 'attention' : ''}`} onClick={() => setExpanded(true)} aria-expanded={expanded} aria-label={toggleLabel} title={toggleLabel}>
+    {!expanded && <button className={`status-launcher ${statusTone(state)} ${hasProblem ? 'attention' : ''}`} onClick={() => requestExpanded(true)} aria-expanded={expanded} aria-label={toggleLabel} title={toggleLabel}>
       <span className={`status-dot ${statusTone(state)}`} />
-      <span className="launcher-label">{hasProblem ? '需要处理' : '运行中'}</span>
+      <span className="launcher-label">状态栏</span>
     </button>}
     {expanded && <header className="control-bar" role="status">
       <div className="brand-lockup">
@@ -134,15 +156,15 @@ function ControlBar(): ReactElement {
       </button>}
       <div className="version">v{state.version}</div>
       <button className="icon-button" onClick={() => void runAction('diagnostics', () => desktopApi.openDiagnostics(), '诊断窗口已打开')} title="打开诊断">
-        <Wrench size={17} />
+        <Activity size={17} />
       </button>
-      {hasProblem && <button className="secondary-button repair-button" onClick={() => void runAction('repair', () => desktopApi.repairRuntime(), '运行时维修已启动')} disabled={busy !== null}>
+      <button className="secondary-button repair-button" onClick={() => void runAction('repair', () => desktopApi.repairRuntime(), '运行时维修已启动')} disabled={busy !== null} title="检查并修复运行时依赖">
         <Wrench size={15} className={busy === 'repair' ? 'spin' : ''} /> 维修运行时
-      </button>}
+      </button>
       <button className="primary-button" onClick={() => void runAction('desktop', () => desktopApi.restartDesktop(), '正在重启桌面端')} disabled={busy !== null}>
         <RefreshCw size={15} className={busy === 'desktop' ? 'spin' : ''} /> 重启
       </button>
-      <button className="icon-button" onClick={() => setExpanded(false)} title="隐藏运行状态" aria-label="隐藏运行状态">
+      <button className="icon-button" onClick={() => requestExpanded(false)} title="隐藏状态栏" aria-label="隐藏状态栏">
         <ChevronUp size={17} />
       </button>
     </header>}

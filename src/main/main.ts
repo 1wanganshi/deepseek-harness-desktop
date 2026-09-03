@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, WebContentsView, ipcMain, session } from 'electron'
+import { app, BrowserWindow, dialog, Menu, MenuItem, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -17,6 +18,9 @@ import { validateDshRuntime } from './runtime-health.js'
 import { createRuntimePaths, ensureRuntimeDirectories, resolveActiveRuntime, type ResolvedRuntime } from './runtime-paths.js'
 import { cleanupStaleProcessLock, isWindowsProcessAlive } from './stale-locks.js'
 import { startAfterProfilePreparation } from './startup-sequence.js'
+import { restartDesktop } from './desktop-restart.js'
+import { repairBundledDependencies } from './bundled-dependencies.js'
+import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
 import type { RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
 
 const nodeExecutable = process.platform === 'win32'
@@ -33,11 +37,13 @@ let pluginManager: PluginManager
 let diagnostics: DiagnosticsStore
 let activeRuntime: ResolvedRuntime
 let diagnosticsWindow: BrowserWindow | null = null
+let tray: Tray | null = null
 let statusPanelExpanded = false
 let maintenanceQueue = Promise.resolve()
 let updateTimer: ReturnType<typeof setInterval> | null = null
 let profilePreparation: Promise<void> = Promise.resolve()
 let prepareActiveProfile: () => Promise<void> = async () => undefined
+let repairBundledAppDependencies: () => Promise<void> = async () => undefined
 let migration: LegacyMigrationStatus = {
   status: 'not-found',
   legacyHome: '',
@@ -48,6 +54,15 @@ let migration: LegacyMigrationStatus = {
   copiedPaths: [],
   error: null,
 }
+
+const APP_USER_MODEL_ID = 'com.deepseek.harness.desktop'
+if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
+
+const STATUS_PANEL_HEIGHT = 76
+// When collapsed the official Web UI owns the full content area. The status
+// control is available from the native application menu, so no black strip is
+// reserved behind it.
+const STATUS_LAUNCHER_HEIGHT = 0
 
 function bundledVersion(appRoot: string): Promise<string> {
   return readInstalledDshVersion(appRoot)
@@ -91,6 +106,14 @@ async function createServices(): Promise<void> {
     { ...process.env, DSH_HOME: paths.dshHome },
     { timeoutMs: 600_000 },
   )
+  repairBundledAppDependencies = async () => {
+    const workerPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
+    const repaired = await repairBundledDependencies({
+      workerPath,
+      install: args => runPnpm(appRoot, args),
+    })
+    if (repaired) void diagnostics.log('已修复桌面应用缺少的官方 workflow worker 依赖')
+  }
   updateService = new OfficialUpdateService({
     paths,
     currentVersion: async () => readInstalledDshVersion(activeRuntime.root),
@@ -193,6 +216,11 @@ async function prepareWebProfile(options: {
   }
 }
 
+async function startRuntime(): Promise<RuntimeState> {
+  await repairBundledAppDependencies()
+  return runtime.start()
+}
+
 async function createWindow(): Promise<void> {
   const appRoot = app.getAppPath()
   mainWindow = new BrowserWindow({
@@ -210,6 +238,15 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('minimize', () => {
+    if (!shouldHideOnMinimize(process.platform)) return
+    hideMainWindow()
+  })
+  mainWindow.on('close', event => {
+    if (!shouldHideOnClose({ platform: process.platform, quitting })) return
+    event.preventDefault()
+    hideMainWindow()
+  })
   mainWindow.on('resize', () => resizeHarnessView())
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -234,7 +271,7 @@ async function createWindow(): Promise<void> {
 
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await mainWindow.loadURL(devUrl)
-  else await mainWindow.loadFile(join(appRoot, 'dist', 'index.html'))
+  else await mainWindow.loadFile(join(appRoot, 'dist-renderer', 'index.html'))
   // BrowserWindow's own WebContentsView is created while loading the shell.
   // Add the official Harness view afterwards so the shell background cannot
   // cover it in Chromium's view compositor.
@@ -267,16 +304,90 @@ async function openDiagnosticsWindow(): Promise<void> {
   diagnosticsWindow.on('closed', () => { diagnosticsWindow = null })
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await diagnosticsWindow.loadURL(`${devUrl}?diagnostics=1`)
-  else await diagnosticsWindow.loadFile(join(appRoot, 'dist', 'index.html'), { query: { diagnostics: '1' } })
+  else await diagnosticsWindow.loadFile(join(appRoot, 'dist-renderer', 'index.html'), { query: { diagnostics: '1' } })
 }
 
 function resizeHarnessView(): void {
   if (mainWindow === null || harnessView === null) return
   const [width, height] = mainWindow.getContentSize()
-  // Keep a slim native-shell strip for the compact status launcher. The full
-  // control bar only reserves its height while explicitly expanded.
-  const topInset = statusPanelExpanded ? 76 : 48
-  harnessView.setBounds({ x: 0, y: topInset, width, height: Math.max(0, height - topInset) })
+  // The official Web UI fills the content area while collapsed. The shell
+  // reserves space only for the fully expanded status bar.
+  const topInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : STATUS_LAUNCHER_HEIGHT
+  const bounds = { x: 0, y: topInset, width, height: Math.max(0, height - topInset) }
+  harnessView.setBounds(bounds)
+  // WebContentsView compositing can apply a stale bound for one frame while
+  // the shell renderer is committing the panel state. Re-apply the expanded
+  // bound on the next turn so the Web UI cannot cover the lower half.
+  if (statusPanelExpanded) {
+    setTimeout(() => {
+      if (statusPanelExpanded && mainWindow !== null && harnessView !== null) harnessView.setBounds(bounds)
+    }, 0)
+  }
+}
+
+function toggleStatusPanelFromMenu(): void {
+  statusPanelExpanded = !statusPanelExpanded
+  resizeHarnessView()
+  mainWindow?.webContents.send('desktop:status-panel-expanded', statusPanelExpanded)
+}
+
+function showMainWindow(): void {
+  if (mainWindow === null || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function hideMainWindow(): void {
+  if (mainWindow === null || mainWindow.isDestroyed()) return
+  mainWindow.hide()
+}
+
+function quitFromTray(): void {
+  quitting = true
+  app.quit()
+}
+
+function resolveTrayIconPath(appRoot: string): string {
+  const installedIconPath = join(process.resourcesPath, 'icon.ico')
+  return existsSync(installedIconPath) ? installedIconPath : join(appRoot, 'resources', 'icon.ico')
+}
+
+function installTray(appRoot: string): void {
+  if (process.platform !== 'win32' || tray !== null) return
+  const iconPath = resolveTrayIconPath(appRoot)
+  if (!existsSync(iconPath)) {
+    void diagnostics.log(`系统托盘图标不存在：${iconPath}`)
+    return
+  }
+  tray = new Tray(nativeImage.createFromPath(iconPath))
+  tray.setToolTip('DeepSeek Harness Desktop')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开 DeepSeek Harness', click: showMainWindow },
+    { label: '隐藏窗口', click: hideMainWindow },
+    { type: 'separator' },
+    { label: '退出桌面端', click: quitFromTray },
+  ]))
+  tray.on('click', showMainWindow)
+  tray.on('double-click', showMainWindow)
+}
+
+function installStatusPanelMenu(): void {
+  const menu = Menu.getApplicationMenu()
+  if (menu === null || menu.items.some(item => item.label === '状态栏')) return
+  menu.append(new MenuItem({ label: '状态栏', click: toggleStatusPanelFromMenu }))
+  Menu.setApplicationMenu(menu)
+}
+
+function scheduleDesktopRelaunch(): void {
+  const helperPath = join(app.getAppPath(), 'dist-electron', 'main', 'restart-helper.js')
+  const helper = spawn(resolveNodeExecutable(), [helperPath, String(process.pid), process.execPath, ...process.argv.slice(1)], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  helper.unref()
+  void diagnostics.log('已安排桌面重启：等待旧进程退出后重新打开应用')
 }
 
 async function loadHarness(url: string): Promise<void> {
@@ -315,15 +426,25 @@ function registerIpc(): void {
   })
   ipcMain.handle('desktop:repair-runtime', async (): Promise<RuntimeState> => queueMaintenance(async () => {
     void diagnostics.log('开始手动维修 Harness 运行时')
+    await repairBundledAppDependencies()
     await startAfterProfilePreparation(profilePreparation, prepareActiveProfile)
     const state = await runtime.restart()
     void diagnostics.log('Harness 运行时维修完成')
     return state
   }))
   ipcMain.handle('desktop:restart-desktop', async (): Promise<void> => {
-    await runtime.stop()
-    app.relaunch()
-    app.exit(0)
+    await restartDesktop({
+      stop: () => runtime.stop(),
+      relaunch: scheduleDesktopRelaunch,
+      // Exit only after the runtime is stopped and the detached helper is
+      // waiting. This releases the single-instance lock before relaunching.
+      exit: code => {
+        quitting = true
+        mainWindow?.hide()
+        app.exit(code)
+      },
+      onStopError: error => void diagnostics.log(`桌面重启前停止 Harness 失败，将继续重启：${error instanceof Error ? error.message : String(error)}`),
+    })
   })
   ipcMain.handle('desktop:check-update', async (): Promise<UpdateStatus> => checkForUpdateAndBroadcast())
   ipcMain.handle('desktop:install-update', async (): Promise<UpdateStatus> => queueMaintenance(async () => {
@@ -331,6 +452,7 @@ function registerIpc(): void {
     mainWindow?.webContents.send('desktop:update-status', status)
     profilePreparation = prepareActiveProfile()
     await profilePreparation
+    await repairBundledAppDependencies()
     await runtime.restart()
     return status
   }))
@@ -340,10 +462,10 @@ function registerIpc(): void {
       const status = await pluginManager.sync()
       profilePreparation = prepareActiveProfile()
       await profilePreparation
-      await runtime.start()
+      await startRuntime()
       return status
     } catch (error) {
-      await startAfterProfilePreparation(profilePreparation, () => runtime.start()).catch(startError => diagnostics.log(`插件同步后恢复 Harness 失败：${startError instanceof Error ? startError.message : String(startError)}`))
+      await startAfterProfilePreparation(profilePreparation, startRuntime).catch(startError => diagnostics.log(`插件同步后恢复 Harness 失败：${startError instanceof Error ? startError.message : String(startError)}`))
       throw error
     }
   }))
@@ -364,9 +486,11 @@ if (!hasSingleInstanceLock) {
     await createServices()
     registerIpc()
     await createWindow()
+    installTray(app.getAppPath())
+    installStatusPanelMenu()
     void checkForUpdateAndBroadcast()
     updateTimer = setInterval(() => { void checkForUpdateAndBroadcast() }, 24 * 60 * 60 * 1_000)
-    await startAfterProfilePreparation(profilePreparation, () => runtime.start()).catch(error => {
+    await startAfterProfilePreparation(profilePreparation, startRuntime).catch(error => {
       const message = error instanceof Error ? error.message : String(error)
       void diagnostics.log(`启动失败：${message}`)
       const options: Electron.MessageBoxOptions = {

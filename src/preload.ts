@@ -20,6 +20,11 @@ const api: DesktopApi = {
     ipcRenderer.on('desktop:update-status', callback)
     return () => ipcRenderer.removeListener('desktop:update-status', callback)
   },
+  onStatusPanelExpanded: (listener) => {
+    const callback = (_event: Electron.IpcRendererEvent, expanded: boolean) => listener(expanded)
+    ipcRenderer.on('desktop:status-panel-expanded', callback)
+    return () => ipcRenderer.removeListener('desktop:status-panel-expanded', callback)
+  },
 }
 
 contextBridge.exposeInMainWorld('desktopApi', api)

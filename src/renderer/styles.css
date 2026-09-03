@@ -28,20 +28,20 @@ button { font: inherit; }
 
 .status-launcher {
   position: fixed;
-  top: 14px;
-  right: 18px;
+  top: 4px;
+  right: 12px;
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 30px;
-  padding: 0 11px;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 9px;
   color: #aab5c5;
   background: rgba(16, 20, 29, .9);
   border: 1px solid #2b3340;
   border-radius: 999px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   backdrop-filter: blur(12px);
   transition: .16s ease;
 }
