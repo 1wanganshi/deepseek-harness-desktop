@@ -9,6 +9,8 @@ The desktop shell does not reimplement the official Harness UI. It starts the of
 - Bundled Node runtime for click-to-run installation.
 - Separate `DSH_HOME` under Electron user data; the desktop shell never reads or logs API keys.
 - Local-only navigation, isolated preload IPC, and a single-instance desktop lock.
+- Windows notification-area tray icon: minimize and window close hide the app while the Harness keeps running; the tray menu can reopen the window or exit cleanly.
+- Windows AppUserModelId, branded `.ico`, NSIS registration, and desktop/Start Menu shortcuts make the package a normal identifiable Windows application.
 - Startup health check, five-second heartbeat, child-process exit monitoring, bounded exponential recovery, and Windows process-tree cleanup.
 - Official npm `latest` check at startup, once per day, and on demand. Installing an update is always a user-click action; the candidate is installed and health-checked before the active pointer changes.
 - Community plugin sync backs up the Web profile, serializes concurrent requests, validates the profile, and restores the previous profile on failure.
@@ -38,7 +40,7 @@ pnpm run pack:dir
 pnpm run pack
 ```
 
-The NSIS installer is written to `release/`. The first build uses the Electron default icon and is unsigned, so Windows SmartScreen may show an unknown-publisher warning. Configure a Windows code-signing certificate and a HTTPS release source before distributing automatic desktop-shell updates.
+The NSIS installer is written to `release/` and includes the branded icon plus the bundled Node runtime. The package is currently unsigned, so Windows SmartScreen may show an unknown-publisher warning. Configure a Windows code-signing certificate and a HTTPS release source before distributing automatic desktop-shell updates.
 
 Official references:
 
