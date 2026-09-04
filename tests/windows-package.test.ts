@@ -13,20 +13,25 @@ describe('Windows desktop distribution metadata', () => {
         appId: string
         productName: string
         win: { icon: string; target: string[] }
-        nsis: { createDesktopShortcut: boolean; createStartMenuShortcut: boolean }
+        nsis: {
+          createDesktopShortcut: boolean
+          createStartMenuShortcut: boolean
+          perMachine: boolean
+        }
         directories: { output: string }
         files: string[]
         extraResources: Array<{ from: string; to: string }>
       }
     }
 
-    expect(manifest.version).toBe('0.2.1')
+    expect(manifest.version).toBe('0.2.3')
     expect(manifest.build.appId).toBe('com.deepseek.harness.desktop')
     expect(manifest.build.productName).toBe('DeepSeek Harness Desktop')
     expect(manifest.build.win.icon).toBe('resources/icon.ico')
     expect(manifest.build.win.target).toContain('nsis')
     expect(manifest.build.nsis.createDesktopShortcut).toBe(true)
     expect(manifest.build.nsis.createStartMenuShortcut).toBe(true)
+    expect(manifest.build.nsis.perMachine).toBe(true)
     expect(manifest.build.extraResources).toContainEqual({ from: 'resources/icon.ico', to: 'icon.ico' })
     expect(manifest.build.directories.output).toBe('release')
     expect(manifest.build.files).toContain('dist-renderer/**')

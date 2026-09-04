@@ -1,4 +1,5 @@
 import type { LegacyMigrationStatus } from '../main/migration.js'
+import type { ProjectSessionMergeStatus } from '../main/session-merge.js'
 
 export type RuntimeStatus = 'starting' | 'running' | 'recovering' | 'stopped' | 'error'
 
@@ -14,6 +15,7 @@ export interface RuntimeState {
 
 export interface RuntimeDiagnostics {
   state: RuntimeState
+  desktopVersion: string
   runtimeRoot: string
   dshHome: string
   recentLogs: string[]
@@ -22,14 +24,18 @@ export interface RuntimeDiagnostics {
   latestVersion: string | null
   updateAvailable: boolean
   migration: LegacyMigrationStatus
+  projectSessionMerge: ProjectSessionMergeStatus
 }
 
-export type RepairCheckStatus = 'pending' | 'ok' | 'fixed' | 'failed' | 'skipped'
+export type RepairCheckStatus = 'pending' | 'checking' | 'repairing' | 'ok' | 'fixed' | 'failed' | 'skipped'
 
 export interface RepairCheck {
   id: string
   label: string
+  description: string
+  repairMethod: string
   status: RepairCheckStatus
+  problem: string | null
   detail: string | null
 }
 
@@ -61,9 +67,13 @@ export interface PluginStatus {
 export interface DesktopApi {
   getSnapshot: () => Promise<RuntimeDiagnostics>
   openDiagnostics: () => Promise<void>
+  openRepairWindow: () => Promise<void>
+  closeRepairWindow: () => Promise<void>
+  setShellOverlayVisible: (visible: boolean) => Promise<void>
   setStatusPanelExpanded: (expanded: boolean) => Promise<void>
+  getStatusPanelExpanded: () => Promise<boolean>
   repairRuntime: () => Promise<RepairReport>
-  restartDesktop: () => Promise<void>
+  restartDesktop: () => Promise<boolean>
   checkForUpdate: () => Promise<UpdateStatus>
   installUpdate: () => Promise<UpdateStatus>
   syncPlugins: () => Promise<PluginStatus>

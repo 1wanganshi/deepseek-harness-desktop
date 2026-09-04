@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createStatusPanelTransition } from '../src/renderer/status-panel-transition.js'
+import { createStatusPanelStateReconciler, createStatusPanelTransition } from '../src/renderer/status-panel-transition.js'
 
 describe('status panel transition', () => {
   it('commits the rendered panel only after the native view is resized', async () => {
@@ -40,5 +40,20 @@ describe('status panel transition', () => {
       'resize:false',
       'render:false',
     ])
+  })
+
+  it('reconciles a native menu state when its event was missed', async () => {
+    let nativeExpanded = false
+    const renderedStates: boolean[] = []
+    const reconcile = createStatusPanelStateReconciler(
+      async () => nativeExpanded,
+      expanded => renderedStates.push(expanded),
+    )
+
+    await reconcile()
+    nativeExpanded = true
+    await reconcile()
+
+    expect(renderedStates).toEqual([false, true])
   })
 })

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, MenuItem, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
+import { app, BrowserWindow, dialog, Menu, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { bundledPnpmScript, runCommand } from './command.js'
 import { DiagnosticsStore } from './diagnostics.js'
 import { migrateLegacyDsh, type LegacyMigrationStatus } from './migration.js'
+import { mergeLegacyProjectSessions, type ProjectSessionMergeStatus } from './session-merge.js'
 import { OfficialUpdateService, readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
 import { PluginManager } from './plugin-manager.js'
@@ -18,11 +19,17 @@ import { validateDshRuntime } from './runtime-health.js'
 import { createRuntimePaths, ensureRuntimeDirectories, resolveActiveRuntime, type ResolvedRuntime } from './runtime-paths.js'
 import { cleanupStaleProcessLock, isWindowsProcessAlive } from './stale-locks.js'
 import { startAfterProfilePreparation } from './startup-sequence.js'
-import { restartDesktop } from './desktop-restart.js'
+import { buildRestartHelperArgs, restartDesktop, shouldProceedWithDesktopRestart } from './desktop-restart.js'
 import { repairBundledDependencies } from './bundled-dependencies.js'
+import { repairOpenAiProviderCompatibility } from './provider-compatibility.js'
 import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
 import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
+import { repairWindowOptions } from './repair-window.js'
+import { buildStatusPanelMenu } from './status-panel-menu.js'
+import { desktopWebPreferences } from './desktop-web-preferences.js'
 import type { RepairCheck, RepairCheckStatus, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
+import { REPAIR_PLAN } from '../shared/repair-plan.js'
+import { createRepairChecks, updateRepairCheck } from '../shared/repair-progress.js'
 
 const nodeExecutable = process.platform === 'win32'
   ? join(process.resourcesPath, 'node', 'node.exe')
@@ -38,6 +45,7 @@ let pluginManager: PluginManager
 let diagnostics: DiagnosticsStore
 let activeRuntime: ResolvedRuntime
 let diagnosticsWindow: BrowserWindow | null = null
+let repairWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let statusPanelExpanded = false
 let maintenanceQueue = Promise.resolve()
@@ -56,6 +64,21 @@ let migration: LegacyMigrationStatus = {
   copiedPaths: [],
   error: null,
 }
+let projectSessionMerge: ProjectSessionMergeStatus = {
+  status: 'not-found',
+  projectCwd: 'D:\\vibecoding\\DHS1',
+  sourceSessionIds: [],
+  copiedSessionIds: [],
+  skippedSessionIds: [],
+  copiedPaths: [],
+  workspaceUpdated: false,
+  workspaceId: null,
+  workspaceSessionIdsAdded: 0,
+  backupPath: null,
+  error: null,
+}
+
+const DHS1_PROJECT_CWD = 'D:\\vibecoding\\DHS1'
 
 const APP_USER_MODEL_ID = 'com.deepseek.harness.desktop'
 if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
@@ -92,7 +115,7 @@ async function createServices(): Promise<void> {
     nodeExecutable: resolveNodeExecutable(),
     log: line => { void log(line) },
     onState: state => {
-      mainWindow?.webContents.send('desktop:runtime-state', state)
+      sendDesktopEvent('desktop:runtime-state', state)
       if (state.status === 'running' && state.url !== null) void loadHarness(state.url)
       if (state.status !== 'running') {
         harnessLoader?.setDesiredUrl(null)
@@ -137,8 +160,10 @@ async function createServices(): Promise<void> {
     getRuntimeRoot: () => activeRuntime.root,
     dshHome: paths.dshHome,
     getState: () => runtime.getState(),
+    getDesktopVersion: () => app.getVersion(),
     getUpdate: () => updateService.getStatus(),
     getMigration: () => migration,
+    getProjectSessionMerge: () => projectSessionMerge,
   })
 
   migration = await migrateLegacyDsh({
@@ -150,6 +175,27 @@ async function createServices(): Promise<void> {
     void diagnostics.log(`已迁移旧 DHS_HOME：${migration.pluginNames.length} 个插件清单，${migration.copiedPaths.length} 项用户数据`)
   } else if (migration.status === 'failed') {
     void diagnostics.log(`旧 DHS_HOME 迁移失败并已回滚：${migration.error ?? '未知错误'}`)
+  }
+
+  try {
+    const providerCompatibility = await repairOpenAiProviderCompatibility(join(paths.dshHome, 'settings.yaml'))
+    if (providerCompatibility.changed) {
+      void diagnostics.log(`启动预检已修复 OpenAI 兼容 Provider 的 developer role：${providerCompatibility.providerIds.join(', ')}`)
+    }
+  } catch (error) {
+    void diagnostics.log(`启动预检未能修复模型 Provider 兼容配置，可从维修窗口重试：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  projectSessionMerge = await mergeLegacyProjectSessions({
+    legacyHome: join(app.getPath('home'), '.dsh'),
+    targetHome: paths.dshHome,
+    projectCwd: DHS1_PROJECT_CWD,
+    backupRoot: join(app.getPath('userData'), 'migration-backups'),
+  })
+  if (projectSessionMerge.status === 'merged' || projectSessionMerge.status === 'already-merged') {
+    void diagnostics.log(`DHS1 会话库统一完成：源记录 ${projectSessionMerge.sourceSessionIds.length} 条，新增 ${projectSessionMerge.copiedSessionIds.length} 条，已存在 ${projectSessionMerge.skippedSessionIds.length} 条${projectSessionMerge.backupPath === null ? '' : `，备份 ${projectSessionMerge.backupPath}`}`)
+  } else if (projectSessionMerge.status === 'failed') {
+    void diagnostics.log(`DHS1 会话库统一失败，源数据保留未改动：${projectSessionMerge.error ?? '未知错误'}`)
   }
 
   const taskBoardLock = join(paths.dshHome, 'task-board', 'ledger-v2.lock')
@@ -238,10 +284,7 @@ async function createWindow(): Promise<void> {
     backgroundColor: '#0b0e14',
     show: false,
     webPreferences: {
-      preload: fileURLToPath(new URL('../preload.js', import.meta.url)),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
+      ...desktopWebPreferences(fileURLToPath(new URL('../preload.js', import.meta.url))),
     },
   })
   mainWindow.once('ready-to-show', () => mainWindow?.show())
@@ -256,6 +299,7 @@ async function createWindow(): Promise<void> {
   })
   mainWindow.on('resize', () => resizeHarnessView())
   mainWindow.on('closed', () => {
+    if (repairWindow !== null && !repairWindow.isDestroyed()) repairWindow.close()
     mainWindow = null
     harnessView = null
     harnessLoader = null
@@ -283,6 +327,7 @@ async function createWindow(): Promise<void> {
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await mainWindow.loadURL(devUrl)
   else await mainWindow.loadFile(join(appRoot, 'dist-renderer', 'index.html'))
+  mainWindow.show()
   // BrowserWindow's own WebContentsView is created while loading the shell.
   // Add the official Harness view afterwards so the shell background cannot
   // cover it in Chromium's view compositor.
@@ -310,16 +355,42 @@ async function openDiagnosticsWindow(): Promise<void> {
     backgroundColor: '#0b0e14',
     title: 'DeepSeek Harness 诊断',
     webPreferences: {
-      preload: fileURLToPath(new URL('../preload.js', import.meta.url)),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
+      ...desktopWebPreferences(fileURLToPath(new URL('../preload.js', import.meta.url))),
     },
   })
   diagnosticsWindow.on('closed', () => { diagnosticsWindow = null })
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await diagnosticsWindow.loadURL(`${devUrl}?diagnostics=1`)
   else await diagnosticsWindow.loadFile(join(appRoot, 'dist-renderer', 'index.html'), { query: { diagnostics: '1' } })
+}
+
+function sendDesktopEvent(channel: string, payload: unknown): void {
+  for (const window of [mainWindow, repairWindow]) {
+    if (window !== null && !window.isDestroyed()) window.webContents.send(channel, payload)
+  }
+}
+
+async function openRepairWindow(): Promise<void> {
+  if (repairWindow !== null && !repairWindow.isDestroyed()) {
+    repairWindow.show()
+    repairWindow.focus()
+    return
+  }
+  const appRoot = app.getAppPath()
+  repairWindow = new BrowserWindow({
+    ...repairWindowOptions(),
+    parent: mainWindow ?? undefined,
+    webPreferences: {
+      ...desktopWebPreferences(fileURLToPath(new URL('../preload.js', import.meta.url))),
+    },
+  })
+  repairWindow.once('ready-to-show', () => repairWindow?.show())
+  repairWindow.on('closed', () => { repairWindow = null })
+  const devUrl = process.env.VITE_DEV_SERVER_URL
+  if (devUrl !== undefined) await repairWindow.loadURL(devUrl + '?repair=1&auto=1')
+  else await repairWindow.loadFile(join(appRoot, 'dist-renderer', 'index.html'), { query: { repair: '1', auto: '1' } })
+  repairWindow.show()
+  void diagnostics?.log(`维修窗口已创建：可见=${repairWindow.isVisible()} 已销毁=${repairWindow.isDestroyed()}`)
 }
 
 function resizeHarnessView(): void {
@@ -330,20 +401,23 @@ function resizeHarnessView(): void {
   const topInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : STATUS_LAUNCHER_HEIGHT
   const bounds = { x: 0, y: topInset, width, height: Math.max(0, height - topInset) }
   harnessView.setBounds(bounds)
+  void diagnostics?.log(`状态栏视图边界：${statusPanelExpanded ? '展开' : '隐藏'} y=${bounds.y} h=${bounds.height}`)
   // WebContentsView compositing can apply a stale bound for one frame while
-  // the shell renderer is committing the panel state. Re-apply the expanded
-  // bound on the next turn so the Web UI cannot cover the lower half.
-  if (statusPanelExpanded) {
-    setTimeout(() => {
-      if (statusPanelExpanded && mainWindow !== null && harnessView !== null) harnessView.setBounds(bounds)
-    }, 0)
-  }
+  // the shell renderer is committing the panel state. Re-apply on the next
+  // turn for both directions so a collapsed panel cannot leave a black strip.
+  setTimeout(() => {
+    if (mainWindow === null || harnessView === null) return
+    const [nextWidth, nextHeight] = mainWindow.getContentSize()
+    const nextInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : STATUS_LAUNCHER_HEIGHT
+    harnessView.setBounds({ x: 0, y: nextInset, width: nextWidth, height: Math.max(0, nextHeight - nextInset) })
+  }, 0)
 }
 
 function toggleStatusPanelFromMenu(): void {
   statusPanelExpanded = !statusPanelExpanded
+  void diagnostics?.log(`状态栏菜单已切换：${statusPanelExpanded ? '展开' : '隐藏'}`)
   resizeHarnessView()
-  mainWindow?.webContents.send('desktop:status-panel-expanded', statusPanelExpanded)
+  sendDesktopEvent('desktop:status-panel-expanded', statusPanelExpanded)
 }
 
 function showMainWindow(): void {
@@ -388,15 +462,17 @@ function installTray(appRoot: string): void {
 }
 
 function installStatusPanelMenu(): void {
-  const menu = Menu.getApplicationMenu()
-  if (menu === null || menu.items.some(item => item.label === '状态栏')) return
-  menu.append(new MenuItem({ label: '状态栏', click: toggleStatusPanelFromMenu }))
-  Menu.setApplicationMenu(menu)
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildStatusPanelMenu(toggleStatusPanelFromMenu)))
 }
 
 function scheduleDesktopRelaunch(): void {
   const helperPath = join(app.getAppPath(), 'dist-electron', 'main', 'restart-helper.js')
-  const helper = spawn(resolveNodeExecutable(), [helperPath, String(process.pid), process.execPath, ...process.argv.slice(1)], {
+  const helper = spawn(resolveNodeExecutable(), buildRestartHelperArgs(
+    helperPath,
+    process.pid,
+    process.execPath,
+    process.argv,
+  ), {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -423,16 +499,9 @@ function queueMaintenance<T>(operation: () => Promise<T>): Promise<T> {
 
 async function checkForUpdateAndBroadcast(): Promise<UpdateStatus> {
   const status = await updateService.check()
-  mainWindow?.webContents.send('desktop:update-status', status)
+  sendDesktopEvent('desktop:update-status', status)
   return status
 }
-
-const REPAIR_STEPS: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'deps', label: '桌面壳内置依赖检查' },
-  { id: 'locks', label: '陈旧进程锁清理' },
-  { id: 'profile', label: '官方 Web 插件依赖重建' },
-  { id: 'runtime', label: '官方 Harness 运行时重启' },
-]
 
 function knownRuntimeErrors(state: RuntimeState): string[] {
   const errors: string[] = []
@@ -443,7 +512,7 @@ function knownRuntimeErrors(state: RuntimeState): string[] {
 
 async function runRepairPipeline(): Promise<RepairReport> {
   const startedAt = new Date().toISOString()
-  const checks: RepairCheck[] = REPAIR_STEPS.map(step => ({ ...step, status: 'pending' as RepairCheckStatus, detail: null }))
+  let checks: RepairCheck[] = createRepairChecks(REPAIR_PLAN)
   const knownErrors = knownRuntimeErrors(runtime.getState())
   const snapshot = (finishedAt: string | null): RepairReport => ({
     startedAt,
@@ -453,11 +522,21 @@ async function runRepairPipeline(): Promise<RepairReport> {
     fixedCount: checks.filter(check => check.status === 'fixed').length,
     state: runtime.getState(),
   })
-  const broadcast = (): void => { mainWindow?.webContents.send('desktop:repair-progress', snapshot(null)) }
-  const complete = (id: string, status: RepairCheckStatus, detail: string): void => {
-    const index = checks.findIndex(check => check.id === id)
-    if (index >= 0) checks[index] = { ...checks[index], status, detail }
+  const broadcast = (): void => { sendDesktopEvent('desktop:repair-progress', snapshot(null)) }
+  const update = (id: string, patch: Partial<Pick<RepairCheck, 'status' | 'problem' | 'detail'>>): void => {
+    checks = updateRepairCheck(checks, id, patch)
     broadcast()
+  }
+  const beginCheck = async (id: string): Promise<void> => {
+    update(id, { status: 'checking', problem: null, detail: '正在检查当前状态…' })
+    await new Promise<void>(resolve => setTimeout(resolve, 80))
+  }
+  const beginRepair = async (id: string, problem: string): Promise<void> => {
+    update(id, { status: 'repairing', problem, detail: '正在执行维修方法…' })
+    await new Promise<void>(resolve => setTimeout(resolve, 80))
+  }
+  const complete = (id: string, status: RepairCheckStatus, detail: string, problem?: string): void => {
+    update(id, { status, detail, ...(problem === undefined ? {} : { problem }) })
   }
   const message = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
@@ -465,36 +544,105 @@ async function runRepairPipeline(): Promise<RepairReport> {
   broadcast()
 
   try {
+    await beginCheck('deps')
     const deps = await repairBundledAppDependencies()
-    complete('deps', deps.fixed ? 'fixed' : 'ok', deps.detail)
-  } catch (error) {
-    complete('deps', 'failed', message(error))
-  }
-
-  try {
-    const taskBoardLock = join(runtimePaths?.dshHome ?? '', 'task-board', 'ledger-v2.lock')
-    const cleaned = await cleanupStaleProcessLock(taskBoardLock, isWindowsProcessAlive)
-    complete('locks', cleaned ? 'fixed' : 'ok', cleaned ? '已清理任务板陈旧进程锁' : '未发现陈旧进程锁')
-  } catch (error) {
-    complete('locks', 'failed', message(error))
-  }
-
-  try {
-    await startAfterProfilePreparation(profilePreparation, prepareActiveProfile)
-    complete('profile', 'ok', '官方 Web 插件依赖已就绪')
-  } catch (error) {
-    complete('profile', 'failed', message(error))
-  }
-
-  try {
-    const state = await runtime.restart()
-    if (state.status === 'running' && state.port !== null) {
-      complete('runtime', 'ok', `官方 Harness 已恢复：127.0.0.1:${state.port}`)
+    if (deps.fixed) {
+      await beginRepair('deps', '检测到官方 workflow 依赖缺失或损坏')
+      complete('deps', 'fixed', deps.detail)
     } else {
-      complete('runtime', 'skipped', `运行时未完全恢复（当前状态：${state.status}），自动恢复会继续尝试`)
+      complete('deps', 'ok', deps.detail, '未发现依赖问题')
     }
   } catch (error) {
-    complete('runtime', 'failed', message(error))
+    complete('deps', 'failed', message(error), '官方 workflow 依赖维修失败')
+  }
+
+  try {
+    await beginCheck('locks')
+    const taskBoardLock = join(runtimePaths?.dshHome ?? '', 'task-board', 'ledger-v2.lock')
+    const cleaned = await cleanupStaleProcessLock(taskBoardLock, isWindowsProcessAlive)
+    if (cleaned) {
+      await beginRepair('locks', '发现任务板陈旧进程锁')
+      complete('locks', 'fixed', '已清理任务板陈旧进程锁')
+    } else {
+      complete('locks', 'ok', '未发现陈旧进程锁', '未发现问题')
+    }
+  } catch (error) {
+    complete('locks', 'failed', message(error), '陈旧进程锁检查失败')
+  }
+
+  try {
+    await beginCheck('profile')
+    await beginRepair('profile', '正在确认 Web profile 依赖和兼容层')
+    await startAfterProfilePreparation(profilePreparation, prepareActiveProfile)
+    complete('profile', 'ok', '官方 Web 插件依赖已就绪', '未发现阻断运行的问题')
+  } catch (error) {
+    complete('profile', 'failed', message(error), 'Web profile 依赖维修失败')
+  }
+
+  try {
+    await beginCheck('sessions')
+    if (runtimePaths === null) throw new Error('运行目录尚未初始化')
+    await beginRepair('sessions', '检查 DHS1 旧库中是否存在桌面端未显示的历史会话')
+    projectSessionMerge = await mergeLegacyProjectSessions({
+      legacyHome: join(app.getPath('home'), '.dsh'),
+      targetHome: runtimePaths.dshHome,
+      projectCwd: DHS1_PROJECT_CWD,
+      backupRoot: join(app.getPath('userData'), 'migration-backups'),
+    })
+    if (projectSessionMerge.status === 'failed') {
+      complete('sessions', 'failed', projectSessionMerge.error ?? 'DHS1 会话统一失败', '源数据已保留，未完成合并')
+    } else if (projectSessionMerge.status === 'merged') {
+      complete('sessions', 'fixed', `已合并 ${projectSessionMerge.copiedSessionIds.length} 条 DHS1 历史会话${projectSessionMerge.backupPath === null ? '' : `，备份已创建`}`)
+    } else {
+      complete('sessions', 'ok', `DHS1 会话已完整：${projectSessionMerge.sourceSessionIds.length} 条可用`, '未发现缺失记录')
+    }
+  } catch (error) {
+    complete('sessions', 'failed', message(error), 'DHS1 会话库检查失败')
+  }
+
+  try {
+    await beginCheck('provider-compatibility')
+    if (runtimePaths === null) throw new Error('运行目录尚未初始化')
+    const providerCompatibility = await repairOpenAiProviderCompatibility(join(runtimePaths.dshHome, 'settings.yaml'))
+    if (providerCompatibility.changed) {
+      await beginRepair('provider-compatibility', `发现 ${providerCompatibility.providerIds.length} 个 reasoning Provider 可能发送 developer role`)
+      complete('provider-compatibility', 'fixed', `已修复 Provider：${providerCompatibility.providerIds.join('、')}`)
+      void diagnostics.log(`已修复 OpenAI 兼容 Provider 的 developer role：${providerCompatibility.providerIds.join(', ')}`)
+    } else {
+      complete('provider-compatibility', 'ok', '未发现需要调整的 reasoning Provider 兼容配置', '未发现问题')
+    }
+  } catch (error) {
+    complete('provider-compatibility', 'failed', message(error), '模型 Provider 兼容配置维修失败')
+  }
+
+  try {
+    await beginCheck('data')
+    if (runtimePaths === null) throw new Error('运行目录尚未初始化')
+    const directories = [runtimePaths.userRuntimeRoot, runtimePaths.dshHome]
+    const missing = directories.filter(path => !existsSync(path))
+    if (missing.length > 0) {
+      await beginRepair('data', `发现 ${missing.length} 个运行目录缺失`)
+      await ensureRuntimeDirectories(runtimePaths)
+      complete('data', 'fixed', `已创建 ${missing.length} 个缺失运行目录`)
+    } else {
+      await ensureRuntimeDirectories(runtimePaths)
+      complete('data', 'ok', 'DSH_HOME 与运行时目录均可访问', '未发现问题')
+    }
+  } catch (error) {
+    complete('data', 'failed', message(error), '运行目录维修失败')
+  }
+
+  try {
+    await beginCheck('runtime')
+    await beginRepair('runtime', '需要重启 Harness 并通过本机健康检查')
+    const state = await runtime.restart()
+    if (state.status === 'running' && state.port !== null) {
+      complete('runtime', 'fixed', `官方 Harness 已恢复：127.0.0.1:${state.port}`)
+    } else {
+      complete('runtime', 'failed', `运行时未完全恢复（当前状态：${state.status}），自动恢复会继续尝试`, 'Harness 未通过健康检查')
+    }
+  } catch (error) {
+    complete('runtime', 'failed', message(error), 'Harness 健康重启失败')
   }
 
   const report = snapshot(new Date().toISOString())
@@ -505,12 +653,48 @@ async function runRepairPipeline(): Promise<RepairReport> {
 function registerIpc(): void {
   ipcMain.handle('desktop:get-snapshot', async (): Promise<RuntimeDiagnostics> => diagnostics.snapshot())
   ipcMain.handle('desktop:open-diagnostics', async (): Promise<void> => openDiagnosticsWindow())
+  ipcMain.handle('desktop:open-repair-window', async (): Promise<void> => openRepairWindow())
+  ipcMain.handle('desktop:close-repair-window', async (): Promise<void> => {
+    if (repairWindow !== null && !repairWindow.isDestroyed()) repairWindow.close()
+  })
+  ipcMain.handle('desktop:set-shell-overlay-visible', async (_event, visible: boolean): Promise<void> => {
+    if (harnessView === null || harnessView.webContents.isDestroyed()) return
+    if (visible) {
+      harnessView.setVisible(false)
+      return
+    }
+    const current = runtime?.getState()
+    if (current?.status === 'running' && current.url !== null) harnessView.setVisible(true)
+  })
   ipcMain.handle('desktop:set-status-panel-expanded', async (_event, expanded: boolean): Promise<void> => {
     statusPanelExpanded = expanded
     resizeHarnessView()
   })
+  ipcMain.handle('desktop:get-status-panel-expanded', async (): Promise<boolean> => statusPanelExpanded)
   ipcMain.handle('desktop:repair-runtime', async (): Promise<RepairReport> => queueMaintenance(() => runRepairPipeline()))
-  ipcMain.handle('desktop:restart-desktop', async (): Promise<void> => {
+  ipcMain.handle('desktop:restart-desktop', async (): Promise<boolean> => {
+    const confirmation = mainWindow !== null && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: '重启 DeepSeek Harness',
+        message: '确认重启桌面端吗？',
+        detail: '当前窗口会关闭，运行时停止后将自动重新打开。',
+        buttons: ['取消', '确认重启'],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+      })
+      : await dialog.showMessageBox({
+        type: 'warning',
+        title: '重启 DeepSeek Harness',
+        message: '确认重启桌面端吗？',
+        detail: '当前窗口会关闭，运行时停止后将自动重新打开。',
+        buttons: ['取消', '确认重启'],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+      })
+    if (!shouldProceedWithDesktopRestart(confirmation.response)) return false
     await restartDesktop({
       stop: () => runtime.stop(),
       relaunch: scheduleDesktopRelaunch,
@@ -523,11 +707,12 @@ function registerIpc(): void {
       },
       onStopError: error => void diagnostics.log(`桌面重启前停止 Harness 失败，将继续重启：${error instanceof Error ? error.message : String(error)}`),
     })
+    return true
   })
   ipcMain.handle('desktop:check-update', async (): Promise<UpdateStatus> => checkForUpdateAndBroadcast())
   ipcMain.handle('desktop:install-update', async (): Promise<UpdateStatus> => queueMaintenance(async () => {
     const status = await updateService.install()
-    mainWindow?.webContents.send('desktop:update-status', status)
+    sendDesktopEvent('desktop:update-status', status)
     profilePreparation = prepareActiveProfile()
     await profilePreparation
     await repairBundledAppDependencies()

@@ -15,6 +15,7 @@ The desktop shell does not reimplement the official Harness UI. It starts the of
 - Official npm `latest` check at startup, once per day, and on demand. Installing an update is always a user-click action; the candidate is installed and health-checked before the active pointer changes.
 - Community plugin sync backs up the Web profile, serializes concurrent requests, validates the profile, and restores the previous profile on failure.
 - Diagnostics window with runtime paths, plugin names, update state, and recent lifecycle logs.
+- Startup preflight and manual repair detect reasoning models behind OpenAI-compatible Providers and write `compat.supportsDeveloperRole: false` for the affected Provider, keeping `reasoningEfforts` enabled and avoiding the 400 error caused by unsupported `developer` roles.
 - First launch discovers the existing `%USERPROFILE%\\.dsh`, backs up both sides, and migrates model providers, credentials, Web plugins, sessions, attachments, and related user data into the isolated desktop `DSH_HOME`. The source directory is never deleted; old plugin `node_modules` is intentionally rebuilt from its lockfile.
 - The NSIS installer creates a desktop shortcut and Start Menu shortcut. The installed app uses the same migrated data on later launches and never repeats the migration after its marker is written.
 

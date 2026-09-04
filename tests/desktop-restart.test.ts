@@ -1,5 +1,40 @@
 import { describe, expect, it, vi } from 'vitest'
-import { restartDesktop } from '../src/main/desktop-restart.js'
+import { buildDesktopRelaunchOptions, buildRestartHelperArgs, restartDesktop, shouldProceedWithDesktopRestart } from '../src/main/desktop-restart.js'
+
+describe('desktop restart confirmation', () => {
+  it('only proceeds for the explicit confirm button', () => {
+    expect(shouldProceedWithDesktopRestart(1)).toBe(true)
+    expect(shouldProceedWithDesktopRestart(0)).toBe(false)
+    expect(shouldProceedWithDesktopRestart(-1)).toBe(false)
+  })
+})
+
+describe('desktop relaunch options', () => {
+  it('preserves the current executable and startup arguments', () => {
+    expect(buildDesktopRelaunchOptions('C:/DHS/Desktop.exe', [
+      'C:/DHS/Desktop.exe',
+      '--user-data-dir',
+      'D:/DHS/.test-user-data',
+    ])).toEqual({
+      execPath: 'C:/DHS/Desktop.exe',
+      args: ['--user-data-dir', 'D:/DHS/.test-user-data'],
+    })
+  })
+
+  it('builds helper arguments that wait for this process before relaunching', () => {
+    expect(buildRestartHelperArgs('C:/DHS/restart-helper.js', 4321, 'C:/DHS/Desktop.exe', [
+      'C:/DHS/Desktop.exe',
+      '--user-data-dir',
+      'D:/DHS/.test-user-data',
+    ])).toEqual([
+      'C:/DHS/restart-helper.js',
+      '4321',
+      'C:/DHS/Desktop.exe',
+      '--user-data-dir',
+      'D:/DHS/.test-user-data',
+    ])
+  })
+})
 
 describe('desktop restart', () => {
   it('relaunches and exits after stopping the runtime', async () => {

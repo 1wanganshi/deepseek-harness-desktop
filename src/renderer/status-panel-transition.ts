@@ -13,3 +13,17 @@ export function createStatusPanelTransition(
     return transition
   }
 }
+
+export function createStatusPanelStateReconciler(
+  readNativeState: () => Promise<boolean>,
+  commitRenderedState: (expanded: boolean) => void,
+): () => Promise<void> {
+  let lastExpanded: boolean | undefined
+
+  return async () => {
+    const expanded = await readNativeState()
+    if (expanded === lastExpanded) return
+    lastExpanded = expanded
+    commitRenderedState(expanded)
+  }
+}

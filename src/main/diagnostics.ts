@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { LegacyMigrationStatus } from './migration.js'
+import type { ProjectSessionMergeStatus } from './session-merge.js'
 import type { RuntimeDiagnostics, RuntimeState } from '../shared/types.js'
 
 export class DiagnosticsStore {
@@ -8,21 +9,26 @@ export class DiagnosticsStore {
   private readonly getRuntimeRoot: () => string
   private readonly dshHome: string
   private readonly getState: () => RuntimeState
+  private readonly getDesktopVersion: () => string
   private readonly getUpdate: () => { latestVersion: string | null; updateAvailable: boolean }
   private readonly getMigration: () => LegacyMigrationStatus
+  private readonly getProjectSessionMerge: () => ProjectSessionMergeStatus
 
   constructor(options: {
     userDataPath: string
     getRuntimeRoot: () => string
     dshHome: string
     getState: () => RuntimeState
+    getDesktopVersion?: () => string
     getUpdate: () => { latestVersion: string | null; updateAvailable: boolean }
     getMigration?: () => LegacyMigrationStatus
+    getProjectSessionMerge?: () => ProjectSessionMergeStatus
   }) {
     this.logPath = join(options.userDataPath, 'logs', 'harness.log')
     this.getRuntimeRoot = options.getRuntimeRoot
     this.dshHome = options.dshHome
     this.getState = options.getState
+    this.getDesktopVersion = options.getDesktopVersion ?? (() => 'unknown')
     this.getUpdate = options.getUpdate
     this.getMigration = options.getMigration ?? (() : LegacyMigrationStatus => ({
       status: 'not-found',
@@ -32,6 +38,19 @@ export class DiagnosticsStore {
       migratedAt: null,
       pluginNames: [],
       copiedPaths: [],
+      error: null,
+    }))
+    this.getProjectSessionMerge = options.getProjectSessionMerge ?? (() : ProjectSessionMergeStatus => ({
+      status: 'not-found',
+      projectCwd: '',
+      sourceSessionIds: [],
+      copiedSessionIds: [],
+      skippedSessionIds: [],
+      copiedPaths: [],
+      workspaceUpdated: false,
+      workspaceId: null,
+      workspaceSessionIdsAdded: 0,
+      backupPath: null,
       error: null,
     }))
   }
@@ -47,6 +66,7 @@ export class DiagnosticsStore {
     const update = this.getUpdate()
     return {
       state: this.getState(),
+      desktopVersion: this.getDesktopVersion(),
       runtimeRoot: this.getRuntimeRoot(),
       dshHome: this.dshHome,
       recentLogs,
@@ -55,6 +75,7 @@ export class DiagnosticsStore {
       latestVersion: update.latestVersion,
       updateAvailable: update.updateAvailable,
       migration: this.getMigration(),
+      projectSessionMerge: this.getProjectSessionMerge(),
     }
   }
 
