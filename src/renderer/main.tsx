@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Activity, ArrowUpCircle, Check, ChevronUp, CircleAlert, CircleCheck, CircleX, Cpu, ExternalLink, ListChecks, RefreshCw, Wrench, X } from 'lucide-react'
-import type { DesktopApi, PluginStatus, RepairCheck, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
+import { Activity, Check, ChevronUp, CircleAlert, CircleCheck, CircleX, Cpu, ListChecks, RefreshCw, Wrench, X } from 'lucide-react'
+import type { DesktopApi, RepairCheck, RepairReport, RuntimeDiagnostics, RuntimeState } from '../shared/types.js'
 import { REPAIR_PLAN } from '../shared/repair-plan.js'
 import { repairStatusLabel } from '../shared/repair-progress.js'
 import { createStatusPanelTransition } from './status-panel-transition.js'
-import { updateBadgeLabel } from './status-copy.js'
-import { getUpdateDialogKind } from './update-flow.js'
 import { shouldAutoStartRepair } from './repair-flow.js'
+import { restartNotice } from '../shared/restart-status.js'
 import './styles.css'
 
 const fallbackState: RuntimeState = {
@@ -21,15 +20,13 @@ const fallbackState: RuntimeState = {
 }
 
 const previewDiagnostics: RuntimeDiagnostics = {
-  state: { ...fallbackState, status: 'running', version: '0.1.1-rc.2', port: 3080, url: 'http://127.0.0.1:3080' },
-  desktopVersion: '0.2.3',
+  state: { ...fallbackState, status: 'running', version: '0.1.2-rc.1', port: 3080, url: 'http://127.0.0.1:3080' },
+  desktopVersion: '0.2.23',
   runtimeRoot: 'Preview mode — Electron runtime path appears here in the desktop app',
   dshHome: 'Preview mode — isolated DSH_HOME appears here in the desktop app',
   recentLogs: [],
   pluginCount: 0,
   pluginNames: [],
-  latestVersion: null,
-  updateAvailable: false,
   migration: {
     status: 'not-found',
     legacyHome: '',
@@ -73,69 +70,13 @@ const previewApi: DesktopApi = {
   setStatusPanelExpanded: async () => undefined,
   getStatusPanelExpanded: async () => false,
   repairRuntime: async () => previewRepairReport,
-  restartDesktop: async () => false,
-  checkForUpdate: async () => ({ currentVersion: '0.1.1-rc.2', latestVersion: null, updateAvailable: false, checkedAt: new Date().toISOString(), error: null }),
-  installUpdate: async () => ({ currentVersion: '0.1.1-rc.2', latestVersion: '0.1.1-rc.2', updateAvailable: false, checkedAt: new Date().toISOString(), error: null }),
-  syncPlugins: async () => ({ profilePath: previewDiagnostics.dshHome, names: [], canSync: true, lastSyncedAt: new Date().toISOString(), error: null }),
+  restartDesktop: async () => ({ restarted: false, report: null }),
   onRuntimeState: () => () => undefined,
-  onUpdateState: () => () => undefined,
   onStatusPanelExpanded: () => () => undefined,
   onRepairProgress: () => () => undefined,
 }
 
 const desktopApi = window.desktopApi ?? previewApi
-
-type UpdateDialogProps = {
-  open: boolean
-  status: UpdateStatus | null
-  busy: boolean
-  onClose: () => void
-  onRetry: () => void
-  onInstall: () => void
-}
-
-function UpdateDialog({ open, status, busy, onClose, onRetry, onInstall }: UpdateDialogProps): ReactElement | null {
-  if (!open) return null
-  const kind = getUpdateDialogKind(status)
-  const canInstall = kind === 'available' && !busy
-  const title = kind === 'checking'
-    ? '正在检查官方更新'
-    : kind === 'available'
-      ? '发现新版本'
-      : kind === 'error'
-        ? '更新检查失败'
-        : '当前已经是最新版本'
-  const detail = kind === 'checking'
-    ? '正在调用 DHS 官方公开版本接口，请稍候。'
-    : kind === 'available'
-      ? `当前版本 v${status?.currentVersion ?? 'unknown'}，可更新到 v${status?.latestVersion ?? 'unknown'}。`
-      : kind === 'error'
-        ? status?.error ?? '无法连接官方版本接口。'
-        : `当前版本 v${status?.currentVersion ?? 'unknown'}${status?.latestVersion ? `，官方最新版本为 v${status.latestVersion}` : ''}。`
-
-  return <div className="modal-backdrop" role="presentation">
-    <section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
-      <div className="confirm-dialog-heading">
-        <div className={`confirm-dialog-icon ${kind === 'error' ? 'danger' : kind === 'available' ? 'attention' : ''}`}>
-          {kind === 'checking' ? <RefreshCw size={18} className="spin" /> : kind === 'error' ? <CircleAlert size={18} /> : kind === 'available' ? <ArrowUpCircle size={18} /> : <CircleCheck size={18} />}
-        </div>
-        <button className="icon-button" onClick={onClose} disabled={busy} title="关闭" aria-label="关闭更新窗口"><X size={15} /></button>
-      </div>
-      <h2 id="update-dialog-title">{title}</h2>
-      <p>{detail}</p>
-      {kind === 'available' && <div className="update-dialog-method"><span>更新内容</span><strong>下载官方 DHS 运行时，完成健康检查后重新连接</strong></div>}
-      {kind === 'checking' && <div className="update-dialog-progress"><RefreshCw size={14} className="spin" /> 正在读取版本信息</div>}
-      {kind === 'error' && <button className="text-button" onClick={onRetry} disabled={busy}><RefreshCw size={13} /> 重新检查</button>}
-      <div className="confirm-dialog-actions">
-        {kind === 'available' && <button className="secondary-button" onClick={onClose} disabled={busy}>稍后更新</button>}
-        {kind === 'available' && <button className="primary-button" onClick={onInstall} disabled={!canInstall}><ArrowUpCircle size={14} /> 立即更新</button>}
-        {kind === 'latest' && <button className="primary-button" onClick={onClose}><Check size={14} /> 知道了</button>}
-        {kind === 'error' && <button className="secondary-button" onClick={onClose}>关闭</button>}
-        {kind === 'checking' && <button className="secondary-button" onClick={onClose} disabled={busy}>取消</button>}
-      </div>
-    </section>
-  </div>
-}
 
 function statusLabel(state: RuntimeState): string {
   if (state.status === 'running') return '稳定运行中'
@@ -154,10 +95,6 @@ function statusTone(state: RuntimeState): string {
 function ControlBar(): ReactElement {
   const [state, setState] = useState<RuntimeState>(fallbackState)
   const [desktopVersion, setDesktopVersion] = useState('unknown')
-  const [update, setUpdate] = useState<UpdateStatus | null>(null)
-  const [updateDialogStatus, setUpdateDialogStatus] = useState<UpdateStatus | null>(null)
-  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
-  const [updateDialogBusy, setUpdateDialogBusy] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const panelTransition = useRef<ReturnType<typeof createStatusPanelTransition> | null>(null)
@@ -177,22 +114,10 @@ function ControlBar(): ReactElement {
     })
   }
 
-  const closeUpdateDialog = (): void => {
-    setUpdateDialogOpen(false)
-    void desktopApi.setShellOverlayVisible(false)
-  }
-
   useEffect(() => {
     void desktopApi.getSnapshot().then(snapshot => {
       setState(snapshot.state)
       setDesktopVersion(snapshot.desktopVersion)
-      setUpdate({
-        currentVersion: snapshot.state.version,
-        latestVersion: snapshot.latestVersion,
-        updateAvailable: snapshot.updateAvailable,
-        checkedAt: null,
-        error: null,
-      })
     }).catch(() => setNotice('控制面暂时无法读取运行状态'))
     const unsubscribeRuntime = desktopApi.onRuntimeState(nextState => {
       setState(nextState)
@@ -203,53 +128,6 @@ function ControlBar(): ReactElement {
       unsubscribePanel()
     }
   }, [])
-  useEffect(() => desktopApi.onUpdateState(setUpdate), [])
-
-  const refreshUpdateDialog = async (): Promise<void> => {
-    setUpdateDialogBusy(true)
-    try {
-      const result = await desktopApi.checkForUpdate()
-      setUpdate(result)
-      setUpdateDialogStatus(result)
-    } catch (error) {
-      setUpdateDialogStatus({
-        currentVersion: update?.currentVersion ?? state.version,
-        latestVersion: null,
-        updateAvailable: false,
-        checkedAt: new Date().toISOString(),
-        error: error instanceof Error ? error.message : String(error),
-      })
-    } finally {
-      setUpdateDialogBusy(false)
-    }
-  }
-
-  const openUpdateDialog = (): void => {
-    void desktopApi.setShellOverlayVisible(true).then(() => {
-      setUpdateDialogOpen(true)
-      setUpdateDialogStatus(update)
-      if (update === null || update.checkedAt === null) void refreshUpdateDialog()
-    }).catch(error => setNotice(error instanceof Error ? error.message : String(error)))
-  }
-
-  const installUpdate = async (): Promise<void> => {
-    setUpdateDialogBusy(true)
-    try {
-      const result = await desktopApi.installUpdate()
-      setUpdate(result)
-      setUpdateDialogStatus(result)
-      closeUpdateDialog()
-      setNotice(`已更新到 v${result.currentVersion}，正在重新连接`)
-    } catch (error) {
-      setUpdateDialogStatus({
-        ...(updateDialogStatus ?? update ?? { currentVersion: state.version, latestVersion: null, updateAvailable: false, checkedAt: null, error: null }),
-        error: error instanceof Error ? error.message : String(error),
-      })
-    } finally {
-      setUpdateDialogBusy(false)
-    }
-  }
-
   const runAction = async (key: string, action: () => Promise<unknown>, message: string) => {
     setBusy(key)
     setNotice(null)
@@ -267,8 +145,9 @@ function ControlBar(): ReactElement {
     setBusy('desktop')
     setNotice(null)
     try {
-      const confirmed = await desktopApi.restartDesktop()
-      if (!confirmed) setNotice('已取消重启')
+      const result = await desktopApi.restartDesktop()
+      const message = restartNotice(result)
+      if (message !== null) setNotice(message)
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error))
     } finally {
@@ -298,9 +177,6 @@ function ControlBar(): ReactElement {
       </div>
       <div className="bar-spacer" />
       {notice !== null && <div className="top-notice" title={notice}>{notice}</div>}
-      <button className={`update-chip ${update?.updateAvailable ? 'has-update' : ''}`} onClick={openUpdateDialog} disabled={busy !== null || updateDialogBusy} title={update?.latestVersion ? `${updateBadgeLabel(update)}：v${update.latestVersion}` : '检查官方更新'}>
-        <span className="update-chip-icon"><ArrowUpCircle size={13} />{update?.updateAvailable && <span className="update-dot" />}</span> 更新
-      </button>
       <button className="icon-button" onClick={() => void runAction('diagnostics', () => desktopApi.openDiagnostics(), '诊断窗口已打开')} title="打开诊断">
         <Activity size={17} />
       </button>
@@ -314,7 +190,6 @@ function ControlBar(): ReactElement {
         <ChevronUp size={17} />
       </button>
     </header>
-    <UpdateDialog open={updateDialogOpen} status={updateDialogStatus} busy={updateDialogBusy} onClose={closeUpdateDialog} onRetry={() => void refreshUpdateDialog()} onInstall={() => void installUpdate()} />
     {state.status !== 'running' && <main className="runtime-placeholder">
       <div className="runtime-placeholder-card">
         <div className={`placeholder-icon ${statusTone(state)}`}><RefreshCw size={22} className={state.status === 'recovering' || state.status === 'starting' ? 'spin' : ''} /></div>
@@ -409,31 +284,14 @@ function RepairPage(): ReactElement {
 
 function DiagnosticsPage(): ReactElement {
   const [snapshot, setSnapshot] = useState<RuntimeDiagnostics | null>(null)
-  const [update, setUpdate] = useState<UpdateStatus | null>(null)
-  const [plugins, setPlugins] = useState<PluginStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
 
   const refresh = async () => {
     const next = await desktopApi.getSnapshot()
     setSnapshot(next)
-    setPlugins({ profilePath: next.dshHome, names: next.pluginNames, canSync: true, lastSyncedAt: null, error: null })
   }
   useEffect(() => { void refresh() }, [])
-
-  const checkUpdate = async () => {
-    setBusy(true)
-    try { setUpdate(await desktopApi.checkForUpdate()); setMessage('已完成官方版本检查') }
-    catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-    finally { setBusy(false) }
-  }
-
-  const syncPlugins = async () => {
-    setBusy(true)
-    try { setPlugins(await desktopApi.syncPlugins()); setMessage('插件同步流程已执行'); await refresh() }
-    catch (error) { setMessage(error instanceof Error ? error.message : String(error)) }
-    finally { setBusy(false) }
-  }
 
   const repairRuntime = async () => {
     setBusy(true)
@@ -468,8 +326,8 @@ function DiagnosticsPage(): ReactElement {
     </div>
     <section className="diagnostic-grid">
       <div className="diagnostic-card prominent"><div className="card-label"><CircleCheck size={15} /> 运行时状态</div><strong>{statusLabel(snapshot.state)}</strong><span>桌面端 v{snapshot.desktopVersion} · 官方 DSH v{snapshot.state.version} · {snapshot.state.port ? `127.0.0.1:${snapshot.state.port}` : '尚未监听端口'}</span>{snapshot.state.lastError && <div className="error-line"><CircleAlert size={14} /> {snapshot.state.lastError}</div>}{snapshot.state.status !== 'running' && <button className="text-button repair-link" onClick={() => void repairRuntime()} disabled={busy}><Wrench size={13} /> 维修运行时</button>}</div>
-      <div className="diagnostic-card"><div className="card-label"><ArrowUpCircle size={15} /> 官方更新</div><strong>{update?.latestVersion ?? snapshot.latestVersion ?? '未检查'}</strong><span>{snapshot.updateAvailable ? '有新版本可安装' : '当前没有待安装更新'}</span><button className="text-button" onClick={() => void checkUpdate()} disabled={busy}>检查 npm 官方版本 <ExternalLink size={13} /></button></div>
-      <div className="diagnostic-card"><div className="card-label"><Wrench size={15} /> 插件生态</div><strong>{plugins?.names.length ?? snapshot.pluginCount} 个插件</strong><span>配置与凭据保留在独立 DSH_HOME</span><button className="text-button" onClick={() => void syncPlugins()} disabled={busy}>同步社区插件 <RefreshCw size={13} /></button></div>
+      <div className="diagnostic-card"><div className="card-label"><CircleCheck size={15} /> 内置版本</div><strong>v{snapshot.state.version}</strong><span>运行时随安装包内置，当前版本不会在线切换。</span><span>如需升级，请交付新的完整安装包。</span></div>
+      <div className="diagnostic-card"><div className="card-label"><Wrench size={15} /> 插件生态</div><strong>{snapshot.pluginCount} 个插件</strong><span>配置与凭据保留在独立 DSH_HOME</span><span>插件版本随稳定安装包统一交付。</span></div>
     </section>
     <section className="migration-card"><div><span className="card-label">配置迁移</span><strong>{migrationLabel}</strong><span>模型、凭据、插件清单、会话与用户数据均不改动旧目录</span></div>{snapshot.migration.backupPath && <code>备份：{snapshot.migration.backupPath}</code>}{snapshot.migration.error && <div className="error-line"><CircleAlert size={14} /> {snapshot.migration.error}</div>}</section>
     <section className="migration-card"><div><span className="card-label">DHS1 会话库</span><strong>{projectMergeLabel}</strong><span>只处理 D:\vibecoding\DHS1 的历史记录，不合并其他项目</span></div>{projectMerge.backupPath && <code>备份：{projectMerge.backupPath}</code>}{projectMerge.error && <div className="error-line"><CircleAlert size={14} /> {projectMerge.error}</div>}</section>

@@ -2,7 +2,7 @@ import { access, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } fro
 import { basename, dirname, join, resolve } from 'node:path'
 import YAML from 'yaml'
 
-export type LegacyMigrationState = 'not-found' | 'migrated' | 'already-migrated' | 'failed'
+export type LegacyMigrationState = 'not-found' | 'migrated' | 'synchronized' | 'already-migrated' | 'failed'
 
 export interface LegacyMigrationStatus {
   status: LegacyMigrationState
@@ -43,6 +43,32 @@ function mergeSettings(target: unknown, source: unknown): unknown {
   const merged: JsonRecord = { ...target }
   for (const [key, value] of Object.entries(source)) {
     merged[key] = key in merged ? mergeSettings(merged[key], value) : value
+  }
+  return merged
+}
+
+/**
+ * Reconcile data written to the old home after its first import. Existing
+ * desktop values always win; records only present in the legacy copy are
+ * added. This preserves a user's newer desktop choices while preventing a
+ * migration marker from hiding later-created models or plugin declarations.
+ */
+function mergeMissingSettings(target: unknown, source: unknown): unknown {
+  if (Array.isArray(target) && Array.isArray(source)) {
+    const merged = [...target]
+    for (const sourceEntry of source) {
+      const sourceId = isRecord(sourceEntry) && typeof sourceEntry.id === 'string' ? sourceEntry.id : undefined
+      const exists = sourceId === undefined
+        ? merged.some(targetEntry => JSON.stringify(targetEntry) === JSON.stringify(sourceEntry))
+        : merged.some(targetEntry => isRecord(targetEntry) && targetEntry.id === sourceId)
+      if (!exists) merged.push(sourceEntry)
+    }
+    return merged
+  }
+  if (!isRecord(target) || !isRecord(source)) return target
+  const merged: JsonRecord = { ...target }
+  for (const [key, value] of Object.entries(source)) {
+    merged[key] = key in merged ? mergeMissingSettings(merged[key], value) : value
   }
   return merged
 }
@@ -108,6 +134,16 @@ async function mergeSettingsFiles(targetPath: string, sourcePath: string): Promi
   await writeYamlAtomically(targetPath, mergeSettings(target, source))
 }
 
+async function mergeMissingSettingsFiles(targetPath: string, sourcePath: string): Promise<boolean> {
+  const source = await parseYamlFile(sourcePath)
+  const target = await pathExists(targetPath) ? await parseYamlFile(targetPath) : {}
+  const merged = mergeMissingSettings(target, source)
+  if (JSON.stringify(merged) === JSON.stringify(target)) return false
+  await mkdir(dirname(targetPath), { recursive: true })
+  await writeYamlAtomically(targetPath, merged)
+  return true
+}
+
 async function readJsonFile(path: string): Promise<JsonRecord> {
   const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
   if (!isRecord(parsed)) throw new Error(`${basename(path)} must contain a JSON object`)
@@ -122,8 +158,7 @@ function profileBundles(value: JsonRecord): string[] {
     : []
 }
 
-function withProfileBundles(target: JsonRecord, source: JsonRecord): JsonRecord {
-  const merged = mergeSettings(target, source) as JsonRecord
+function withProfileBundles(target: JsonRecord, source: JsonRecord, merged: JsonRecord = mergeSettings(target, source) as JsonRecord): JsonRecord {
   const targetBundleNames = profileBundles(target)
   const sourceBundleNames = profileBundles(source)
   const bundles = [...new Set([...targetBundleNames, ...sourceBundleNames])]
@@ -139,6 +174,53 @@ async function mergeProfilePackage(targetPath: string, sourcePath: string): Prom
   await mkdir(dirname(targetPath), { recursive: true })
   await writeFile(targetPath, `${JSON.stringify(withProfileBundles(target, source), null, 2)}\n`, 'utf8')
   return Object.keys(isRecord(source.dependencies) ? source.dependencies : {}).sort()
+}
+
+async function mergeMissingProfilePackage(targetPath: string, sourcePath: string): Promise<{ changed: boolean; pluginNames: string[] }> {
+  const source = await readJsonFile(sourcePath)
+  const target = await pathExists(targetPath) ? await readJsonFile(targetPath) : {}
+  const merged = withProfileBundles(target, source, mergeMissingSettings(target, source) as JsonRecord)
+  if (JSON.stringify(merged) === JSON.stringify(target)) {
+    return { changed: false, pluginNames: Object.keys(isRecord(source.dependencies) ? source.dependencies : {}).sort() }
+  }
+  await mkdir(dirname(targetPath), { recursive: true })
+  await writeFile(targetPath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+  return { changed: true, pluginNames: Object.keys(isRecord(source.dependencies) ? source.dependencies : {}).sort() }
+}
+
+async function synchronizeMigratedLegacyHome(existing: LegacyMigrationStatus, options: LegacyMigrationOptions): Promise<LegacyMigrationStatus> {
+  const legacyHome = resolve(options.legacyHome)
+  const targetHome = resolve(options.targetHome)
+  if (!(await pathExists(legacyHome))) return existing
+  try {
+    let changed = false
+    const sourceSettings = join(legacyHome, 'settings.yaml')
+    if (await pathExists(sourceSettings)) {
+      changed = await mergeMissingSettingsFiles(join(targetHome, 'settings.yaml'), sourceSettings) || changed
+    }
+    const sourcePackage = join(legacyHome, 'profiles', 'web', 'package.json')
+    let pluginNames = existing.pluginNames
+    if (await pathExists(sourcePackage)) {
+      const profile = await mergeMissingProfilePackage(join(targetHome, 'profiles', 'web', 'package.json'), sourcePackage)
+      changed = profile.changed || changed
+      pluginNames = [...new Set([...existing.pluginNames, ...profile.pluginNames])].sort()
+    }
+    return {
+      ...existing,
+      status: changed ? 'synchronized' : 'already-migrated',
+      legacyHome,
+      targetHome,
+      pluginNames,
+    }
+  } catch (error) {
+    return {
+      ...existing,
+      status: 'failed',
+      legacyHome,
+      targetHome,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
 
 async function readMarker(path: string): Promise<LegacyMigrationStatus | null> {
@@ -210,7 +292,7 @@ export async function migrateLegacyDsh(options: LegacyMigrationOptions): Promise
   const targetHome = resolve(options.targetHome)
   const markerPath = join(targetHome, markerName)
   const existing = await readMarker(markerPath)
-  if (existing !== null) return existing
+  if (existing !== null) return synchronizeMigratedLegacyHome(existing, options)
   if (!(await pathExists(legacyHome))) {
     return { status: 'not-found', legacyHome, targetHome, backupPath: null, migratedAt: null, pluginNames: [], copiedPaths: [], error: null }
   }

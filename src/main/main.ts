@@ -4,22 +4,23 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bundledPnpmScript, runCommand } from './command.js'
+import { bundledNpmDepsPath, bundledNpmScript, bundledPnpmScript, runCommand } from './command.js'
 import { DiagnosticsStore } from './diagnostics.js'
 import { migrateLegacyDsh, type LegacyMigrationStatus } from './migration.js'
+import { ConfigurationDurabilityGuard } from './configuration-durability.js'
 import { mergeLegacyProjectSessions, type ProjectSessionMergeStatus } from './session-merge.js'
-import { OfficialUpdateService, readInstalledDshVersion } from './official-updates.js'
+import { SessionDurabilityGuard, recoverMissingSessionIndexes, repairWorkspaceLinks } from './session-durability.js'
+import { readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
-import { PluginManager } from './plugin-manager.js'
-import { prepareOfficialWebProfile } from './profile-preparation.js'
-import { synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
-import { mitigateIncompatibleTaskBoard } from './incompatible-plugins.js'
+import { hasMissingProfileDependencies, prepareOfficialWebProfile } from './profile-preparation.js'
+import { ensureClientStoreCompatibility, ensureVisionRouterCompatibility, synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
+import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile } from './incompatible-plugins.js'
 import { RuntimeController } from './runtime-controller.js'
-import { validateDshRuntime } from './runtime-health.js'
-import { createRuntimePaths, ensureRuntimeDirectories, resolveActiveRuntime, type ResolvedRuntime } from './runtime-paths.js'
-import { cleanupStaleProcessLock, isWindowsProcessAlive } from './stale-locks.js'
+import { createRuntimePaths, ensureRuntimeDirectories, resolveBundledRuntime, type ResolvedRuntime } from './runtime-paths.js'
+import { cleanupStaleProcessLock, isWindowsDshProcessAlive, isWindowsProcessAlive } from './stale-locks.js'
+import { removeLegacyDoctorSupervisor } from './doctor-supervisor.js'
 import { startAfterProfilePreparation } from './startup-sequence.js'
-import { buildRestartHelperArgs, restartDesktop, shouldProceedWithDesktopRestart } from './desktop-restart.js'
+import { buildRestartHelperArgs, restartDesktop, shutdownDesktop, shouldProceedWithDesktopRestart, type DesktopRestartResult } from './desktop-restart.js'
 import { repairBundledDependencies } from './bundled-dependencies.js'
 import { repairOpenAiProviderCompatibility } from './provider-compatibility.js'
 import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
@@ -27,7 +28,7 @@ import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
 import { repairWindowOptions } from './repair-window.js'
 import { buildStatusPanelMenu } from './status-panel-menu.js'
 import { desktopWebPreferences } from './desktop-web-preferences.js'
-import type { RepairCheck, RepairCheckStatus, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from '../shared/types.js'
+import type { RepairCheck, RepairCheckStatus, RepairReport, RuntimeDiagnostics, RuntimeState } from '../shared/types.js'
 import { REPAIR_PLAN } from '../shared/repair-plan.js'
 import { createRepairChecks, updateRepairCheck } from '../shared/repair-progress.js'
 
@@ -40,8 +41,6 @@ let mainWindow: BrowserWindow | null = null
 let harnessView: WebContentsView | null = null
 let harnessLoader: HarnessLoader | null = null
 let runtime: RuntimeController
-let updateService: OfficialUpdateService
-let pluginManager: PluginManager
 let diagnostics: DiagnosticsStore
 let activeRuntime: ResolvedRuntime
 let diagnosticsWindow: BrowserWindow | null = null
@@ -49,11 +48,18 @@ let repairWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let statusPanelExpanded = false
 let maintenanceQueue = Promise.resolve()
-let updateTimer: ReturnType<typeof setInterval> | null = null
+let desktopExitInFlight = false
+let quitApproved = false
 let profilePreparation: Promise<void> = Promise.resolve()
 let prepareActiveProfile: () => Promise<void> = async () => undefined
 let repairBundledAppDependencies: () => Promise<{ fixed: boolean; detail: string }> = async () => ({ fixed: false, detail: '桌面壳依赖维修尚未初始化' })
 let runtimePaths: ReturnType<typeof createRuntimePaths> | null = null
+let sessionDurability: SessionDurabilityGuard | null = null
+let configurationDurability: ConfigurationDurabilityGuard | null = null
+let authenticatedHarnessAdvertisedUrl: string | null = null
+let authenticatedHarnessTargetUrl: string | null = null
+let harnessMountRecoveryAttempts = 0
+let harnessMountRecoveryInFlight = false
 let migration: LegacyMigrationStatus = {
   status: 'not-found',
   legacyHome: '',
@@ -84,6 +90,7 @@ const APP_USER_MODEL_ID = 'com.deepseek.harness.desktop'
 if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
 
 const STATUS_PANEL_HEIGHT = 76
+const MAX_HARNESS_MOUNT_RECOVERY_ATTEMPTS = 2
 // When collapsed the official Web UI owns the full content area. The status
 // control is available from the native application menu, so no black strip is
 // reserved behind it.
@@ -103,12 +110,15 @@ async function createServices(): Promise<void> {
   runtimePaths = paths
   await ensureRuntimeDirectories(paths)
   const initialVersion = await bundledVersion(appRoot)
-  activeRuntime = await resolveActiveRuntime(paths, initialVersion)
+  // The released desktop build is immutable: the DSH runtime is always the
+  // copy shipped in this installation. User-data runtime pointers are kept as
+  // diagnostics/history only and can never replace the bundled runtime.
+  activeRuntime = resolveBundledRuntime(paths, initialVersion)
 
   const log = async (line: string) => diagnostics?.log(line)
   runtime = new RuntimeController({
     resolveRuntime: async () => {
-      activeRuntime = await resolveActiveRuntime(paths, initialVersion)
+      activeRuntime = resolveBundledRuntime(paths, initialVersion)
       return activeRuntime
     },
     dshHome: paths.dshHome,
@@ -118,11 +128,21 @@ async function createServices(): Promise<void> {
       sendDesktopEvent('desktop:runtime-state', state)
       if (state.status === 'running' && state.url !== null) void loadHarness(state.url)
       if (state.status !== 'running') {
+        authenticatedHarnessAdvertisedUrl = null
+        authenticatedHarnessTargetUrl = null
         harnessLoader?.setDesiredUrl(null)
         harnessLoader?.clearLoadedUrl()
         harnessView?.setVisible(false)
       }
     },
+  })
+  sessionDurability = new SessionDurabilityGuard({
+    dshHome: paths.dshHome,
+    backupRoot: join(app.getPath('userData'), 'session-durability-backups'),
+  })
+  configurationDurability = new ConfigurationDurabilityGuard({
+    dshHome: paths.dshHome,
+    backupRoot: join(app.getPath('userData'), 'configuration-durability-backups'),
   })
 
   const pnpmScript = bundledPnpmScript(appRoot)
@@ -131,6 +151,29 @@ async function createServices(): Promise<void> {
     [pnpmScript, ...args],
     cwd,
     { ...process.env, DSH_HOME: paths.dshHome },
+    { timeoutMs: 600_000 },
+  )
+  const packagedNpmScript = bundledNpmScript(appRoot, process.resourcesPath)
+  const npmScript = existsSync(packagedNpmScript) ? packagedNpmScript : bundledNpmScript(appRoot)
+  const packagedNpmDeps = bundledNpmDepsPath(process.resourcesPath)
+  const npmNodePath = existsSync(packagedNpmDeps)
+    ? packagedNpmDeps
+    : process.env.NODE_PATH
+  const npmLoader = join(process.resourcesPath, 'npm-loader.cjs')
+  const npmOptions = existsSync(npmLoader)
+    ? [process.env.NODE_OPTIONS, `--require=${npmLoader}`].filter((value): value is string => Boolean(value)).join(' ')
+    : process.env.NODE_OPTIONS
+  const runNpm = (cwd: string, args: string[]) => runCommand(
+    resolveNodeExecutable(),
+    [npmScript, ...args],
+    cwd,
+    {
+      ...process.env,
+      DSH_HOME: paths.dshHome,
+      ...(npmNodePath === undefined ? {} : { NODE_PATH: npmNodePath }),
+      ...(npmOptions === undefined ? {} : { NODE_OPTIONS: npmOptions }),
+      DSH_NPM_DEPS: npmNodePath ?? '',
+    },
     { timeoutMs: 600_000 },
   )
   repairBundledAppDependencies = async () => {
@@ -144,27 +187,19 @@ async function createServices(): Promise<void> {
     if (repaired) void diagnostics.log('已修复桌面应用缺少的官方 workflow worker 依赖')
     return { fixed: repaired, detail: repaired ? '已重新安装官方 workflow worker 依赖' : '官方 workflow worker 依赖完整' }
   }
-  updateService = new OfficialUpdateService({
-    paths,
-    currentVersion: async () => readInstalledDshVersion(activeRuntime.root),
-    runPnpm,
-    healthValidate: candidateRoot => validateDshRuntime({
-      runtimeRoot: candidateRoot,
-      nodeExecutable: resolveNodeExecutable(),
-      dshHome: paths.dshHome,
-    }),
-  })
-  pluginManager = new PluginManager({ dshHome: paths.dshHome, runPnpm })
   diagnostics = new DiagnosticsStore({
     userDataPath: app.getPath('userData'),
     getRuntimeRoot: () => activeRuntime.root,
     dshHome: paths.dshHome,
     getState: () => runtime.getState(),
     getDesktopVersion: () => app.getVersion(),
-    getUpdate: () => updateService.getStatus(),
     getMigration: () => migration,
     getProjectSessionMerge: () => projectSessionMerge,
   })
+
+  if (await removeLegacyDoctorSupervisor()) {
+    void diagnostics.log('已移除旧版社区 Doctor 后台监督任务；桌面端将自行管理运行时重启和维修')
+  }
 
   migration = await migrateLegacyDsh({
     legacyHome: join(app.getPath('home'), '.dsh'),
@@ -175,6 +210,15 @@ async function createServices(): Promise<void> {
     void diagnostics.log(`已迁移旧 DHS_HOME：${migration.pluginNames.length} 个插件清单，${migration.copiedPaths.length} 项用户数据`)
   } else if (migration.status === 'failed') {
     void diagnostics.log(`旧 DHS_HOME 迁移失败并已回滚：${migration.error ?? '未知错误'}`)
+  }
+
+  try {
+    const protection = await configurationDurability.protect()
+    if (protection.restored.length > 0) {
+      void diagnostics.log(`启动前已从本机安全快照补回配置：${protection.restored.join('、')}`)
+    }
+  } catch (error) {
+    void diagnostics.log(`配置安全快照检查失败，未修改原始数据：${error instanceof Error ? error.message : String(error)}`)
   }
 
   try {
@@ -203,15 +247,24 @@ async function createServices(): Promise<void> {
     void diagnostics.log('已清理任务板陈旧进程锁，原进程已不存在')
   }
 
+  const profileModulesLock = join(paths.dshHome, 'profiles', 'node_modules.lock')
+  if (await cleanupStaleProcessLock(profileModulesLock, pid => isWindowsDshProcessAlive(pid, paths.dshHome))) {
+    void diagnostics.log('已清理 Web 插件依赖的陈旧进程锁，原进程已不存在')
+  }
+
   const profilePath = join(paths.dshHome, 'profiles', 'web')
   const profileNodeModules = join(profilePath, 'node_modules')
   const profilePackagePath = join(profilePath, 'package.json')
   if (existsSync(profilePackagePath)) {
+    const profilePatchLock = join(profilePath, 'cordis.patch.yml.lock')
+    if (await cleanupStaleProcessLock(profilePatchLock, isWindowsProcessAlive)) {
+      void diagnostics.log('已清理 Web profile 补丁的陈旧进程锁，原进程已不存在')
+    }
     // Preparation can rebuild the profile dependency tree. Keep it separate
     // from window creation, but never let the Harness boot while pnpm is
     // changing files that the Harness will load.
     prepareActiveProfile = async () => {
-      activeRuntime = await resolveActiveRuntime(paths, initialVersion)
+      activeRuntime = resolveBundledRuntime(paths, initialVersion)
       await prepareWebProfile({
         paths,
         profilePath,
@@ -236,42 +289,79 @@ async function prepareWebProfile(options: {
   runtimeVersion: string
 }): Promise<void> {
   const { paths, profilePath, profileNodeModules, profilePackagePath, migrationStatus, runPnpm, runtimeVersion } = options
+  // DHS validates this file during process boot. Repair legacy formats before
+  // any dependency work so a failed install can never leave a boot-blocking
+  // overlay behind.
+  const patchNormalization = await normalizeProfilePatchFile(profilePath)
+  if (patchNormalization.changed) {
+    void diagnostics.log('启动预检已将 Web profile patch 修复为合法数组格式')
+  }
   try {
     const lockfile = join(profilePath, 'pnpm-lock.yaml')
     const compatibilityPackagePath = join(profileNodeModules, '@deepseek-ai', 'dsh-client-store', 'package.json')
     const compatibilityPatchPath = join(profileNodeModules, '@deepseek-ai', 'dsh-client-store', 'cordis.patch.yml')
     const compatibilityClientPath = join(profileNodeModules, '@deepseek-ai', 'dsh-client-store', 'client.js')
+    const missingProfileDependencies = await hasMissingProfileDependencies(profilePath)
+    if (missingProfileDependencies.length > 0) {
+      void diagnostics.log(`启动预检发现 ${missingProfileDependencies.length} 个 profile 依赖缺失：${missingProfileDependencies.join(', ')}`)
+    }
     const preparation = await prepareOfficialWebProfile({
       dshHome: paths.dshHome,
       profilePath,
       packagePath: profilePackagePath,
       nodeModulesPresent: existsSync(profileNodeModules),
       dependencyInstallRequired: migrationStatus === 'migrated'
+        || missingProfileDependencies.length > 0
         || !existsSync(compatibilityPackagePath)
         || !existsSync(compatibilityPatchPath)
         || !existsSync(compatibilityClientPath),
       lockfilePresent: existsSync(lockfile),
+      runtimeVersion,
       install: args => runPnpm(profilePath, args),
     })
     if (await synchronizeInstalledClientStoreCompatibility({ dshHome: paths.dshHome, profilePath })) {
       void diagnostics.log('已同步旧版 Web 插件兼容包文件')
     }
+    if (await ensureVisionRouterCompatibility({ profilePath })) {
+      void diagnostics.log('已启用 Vision Router 远程目录竞态兼容层')
+    }
     if (preparation.compatibilityChanged) void diagnostics.log('已启用旧版 Web 插件兼容层：dsh-client-store → 官方 dsh-client-runtime')
     if (preparation.rebuiltDependencies) void diagnostics.log('已为官方 Web profile 重建插件依赖')
     const mitigation = await mitigateIncompatibleTaskBoard({ profilePath, runtimeVersion })
+    if (mitigation.changed) {
+      void diagnostics.log('已应用稳定性插件加载覆盖；受影响插件的文件、配置和凭据均保留')
+    }
     if (mitigation.taskBoardDisabled) {
-      void diagnostics.log('当前官方 Harness 版本低于任务板插件要求，已只禁用任务板入口；插件文件和配置仍保留')
-    } else if (mitigation.changed) {
-      void diagnostics.log('官方 Harness 已满足任务板插件版本要求，已移除临时兼容覆盖')
+      void diagnostics.log('当前官方 Harness 版本低于任务板插件要求，已禁用不兼容入口；插件文件和配置仍保留')
     }
   } catch (error) {
-    void diagnostics.log(`插件兼容层或依赖重建暂未完成，可在诊断窗口手动同步：${error instanceof Error ? error.message : String(error)}`)
+    const detail = error instanceof Error ? error.message : String(error)
+    // Never launch Harness against a partially rebuilt profile. Keeping the
+    // rejection lets the startup gate show the real failure and leaves the
+    // existing profile backup available for the repair flow.
+    void diagnostics.log(`插件兼容层或依赖重建失败，已阻止启动：${detail}`)
+    throw error
   }
 }
 
 async function startRuntime(): Promise<RuntimeState> {
   await repairBundledAppDependencies()
-  return runtime.start()
+  if (runtimePaths === null) throw new Error('运行时路径尚未初始化')
+  if (configurationDurability !== null) {
+    const protection = await configurationDurability.protect()
+    if (protection.restored.length > 0) {
+      void diagnostics.log(`启动前已从本机安全快照补回配置：${protection.restored.join('、')}`)
+    }
+  }
+  const recovered = await recoverMissingSessionIndexes(runtimePaths.dshHome)
+  const linked = await repairWorkspaceLinks(runtimePaths.dshHome, join(app.getPath('userData'), 'session-durability-backups'))
+  if (recovered.length > 0) {
+    void diagnostics.log(`已从持久化转录恢复 ${recovered.length} 个会话索引`)
+  }
+  if (linked.length > 0) void diagnostics.log(`已将 ${linked.length} 个会话重新挂回所属工作区`)
+  const state = await runtime.start()
+  await sessionDurability?.captureBaseline()
+  return state
 }
 
 async function createWindow(): Promise<void> {
@@ -293,7 +383,7 @@ async function createWindow(): Promise<void> {
     hideMainWindow()
   })
   mainWindow.on('close', event => {
-    if (!shouldHideOnClose({ platform: process.platform, quitting })) return
+    if (!shouldHideOnClose({ platform: process.platform, quitting: quitApproved })) return
     event.preventDefault()
     hideMainWindow()
   })
@@ -316,7 +406,60 @@ async function createWindow(): Promise<void> {
   harnessView.webContents.on('will-navigate', (event, url) => {
     if (!isLocalUrl(url)) event.preventDefault()
   })
+  harnessView.webContents.on('did-start-loading', () => {
+    void diagnostics.log('官方 Web UI 开始加载')
+  })
+  harnessView.webContents.on('dom-ready', () => {
+    void diagnostics.log(`官方 Web UI DOM 已就绪：${harnessView?.webContents.getURL() ?? 'unknown'}`)
+  })
+  harnessView.webContents.on('did-finish-load', () => {
+    const webContents = harnessView?.webContents
+    void diagnostics.log(`官方 Web UI 加载完成：${webContents?.getURL() ?? 'unknown'}`)
+    if (webContents !== undefined) {
+      void webContents.executeJavaScript(`(() => {
+        const root = document.querySelector('#root')
+        return JSON.stringify({
+          readyState: document.readyState,
+          rootChildren: root?.childElementCount ?? -1,
+          bodyText: document.body?.innerText?.slice(0, 240) ?? '',
+          bootReady: Boolean(window.__DSH_BOOT_READY__),
+        })
+      })()`, true).then(result => {
+        const rawStatus = String(result)
+        void diagnostics.log(`官方 Web UI 挂载状态：${rawStatus}`)
+        try {
+          const status = JSON.parse(rawStatus) as { rootChildren?: number; bodyText?: string; bootReady?: boolean }
+          const bodyText = (status.bodyText ?? '').trim()
+          if (bodyText.includes('Failed to load plugins')) {
+            void diagnostics.log(`官方 Web UI 插件加载失败：${bodyText}`)
+            return
+          }
+          if ((status.rootChildren ?? 0) > 0 || status.bootReady === true || bodyText !== '') {
+            harnessMountRecoveryAttempts = 0
+            harnessMountRecoveryInFlight = false
+            return
+          }
+          scheduleHarnessMountRecovery('页面加载完成但未挂载', runtime.getState().url)
+        } catch (error) {
+          void diagnostics.log(`官方 Web UI 挂载状态解析失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }).catch(error => {
+        void diagnostics.log(`官方 Web UI 挂载检查失败：${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
+  })
+  harnessView.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    void diagnostics.log(`官方 Web UI 加载失败：code=${errorCode} ${errorDescription} url=${validatedURL} mainFrame=${isMainFrame}`)
+    if (isMainFrame) scheduleHarnessMountRecovery(`加载失败 ${errorCode}`, runtime.getState().url)
+  })
+  harnessView.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    void diagnostics.log(`官方 Web UI 控制台：level=${level} ${message} (${sourceId}:${line})`)
+  })
   harnessView.webContents.on('render-process-gone', () => {
+    harnessMountRecoveryAttempts = 0
+    harnessMountRecoveryInFlight = false
+    authenticatedHarnessAdvertisedUrl = null
+    authenticatedHarnessTargetUrl = null
     harnessLoader?.clearLoadedUrl()
     harnessLoader?.setDesiredUrl(null)
     harnessView?.setVisible(false)
@@ -432,9 +575,64 @@ function hideMainWindow(): void {
   mainWindow.hide()
 }
 
+function describeSessionBlockers(report: Awaited<ReturnType<SessionDurabilityGuard['verifyForRestart']>> | null): string {
+  if (report === null || report.blockers.length === 0) return 'Harness 停止失败，未执行退出。'
+  return report.blockers.map(blocker => `会话 ${blocker.sessionId}：${blocker.reason}`).join('\n')
+}
+
+async function requestSafeDesktopExit(): Promise<void> {
+  if (quitApproved || desktopExitInFlight) return
+  if (runtime === undefined || sessionDurability === null) {
+    quitApproved = true
+    app.quit()
+    return
+  }
+  desktopExitInFlight = true
+  try {
+    const result = await shutdownDesktop({
+      verifyBeforeStop: () => sessionDurability?.verifyForRestart() ?? Promise.reject(new Error('会话持久化守卫尚未初始化')),
+      stop: () => runtime.stop(),
+      verifyAfterStop: () => sessionDurability?.verifyForRestart() ?? Promise.reject(new Error('会话持久化守卫尚未初始化')),
+      resumeAfterBlockedStop: async () => { await startRuntime() },
+      onStopError: error => void diagnostics.log(`桌面退出前停止 Harness 失败，已取消退出：${error instanceof Error ? error.message : String(error)}`),
+    })
+    if (!result.stopped) {
+      const detail = describeSessionBlockers(result.report)
+      void diagnostics.log(`已取消桌面退出：${detail.replace(/\n/g, '；')}`)
+      const options: Electron.MessageBoxOptions = {
+        type: 'warning',
+        title: 'DeepSeek Harness Desktop',
+        message: '为保护会话记录，桌面端未退出。',
+        detail,
+        buttons: ['知道了'],
+        noLink: true,
+      }
+      if (mainWindow !== null && !mainWindow.isDestroyed()) void dialog.showMessageBox(mainWindow, options)
+      else void dialog.showMessageBox(options)
+      return
+    }
+    quitApproved = true
+    app.quit()
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    void diagnostics.log(`桌面退出前会话校验失败，已取消退出：${detail}`)
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      title: 'DeepSeek Harness Desktop',
+      message: '无法确认会话已完整保存，桌面端未退出。',
+      detail,
+      buttons: ['知道了'],
+      noLink: true,
+    }
+    if (mainWindow !== null && !mainWindow.isDestroyed()) void dialog.showMessageBox(mainWindow, options)
+    else void dialog.showMessageBox(options)
+  } finally {
+    desktopExitInFlight = false
+  }
+}
+
 function quitFromTray(): void {
-  quitting = true
-  app.quit()
+  void requestSafeDesktopExit()
 }
 
 function resolveTrayIconPath(appRoot: string): string {
@@ -483,11 +681,92 @@ function scheduleDesktopRelaunch(): void {
 
 async function loadHarness(url: string): Promise<void> {
   if (harnessView === null || harnessLoader === null) return
-  harnessLoader.setDesiredUrl(url)
   try {
-    await harnessLoader.load(url)
+    const authenticatedUrl = authenticatedHarnessAdvertisedUrl === url && authenticatedHarnessTargetUrl !== null
+      ? authenticatedHarnessTargetUrl
+      : await authenticateHarnessUrl(url)
+    if (authenticatedUrl !== url) {
+      authenticatedHarnessAdvertisedUrl = url
+      authenticatedHarnessTargetUrl = authenticatedUrl
+    }
+    harnessLoader.setDesiredUrl(authenticatedUrl)
+    await harnessLoader.load(authenticatedUrl)
   } catch (error) {
+    harnessLoader.setDesiredUrl(null)
+    harnessLoader.clearLoadedUrl()
+    harnessView.setVisible(false)
     void diagnostics.log(`官方 Web UI 加载失败，将在恢复后重试：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function scheduleHarnessMountRecovery(reason: string, url: string | null): void {
+  if (url === null || harnessView === null || harnessLoader === null || harnessMountRecoveryInFlight) return
+  if (harnessMountRecoveryAttempts >= MAX_HARNESS_MOUNT_RECOVERY_ATTEMPTS) {
+    void diagnostics.log(`官方 Web UI 连续挂载失败，已停止自动重试：${reason}`)
+    harnessLoader.setDesiredUrl(null)
+    harnessLoader.clearLoadedUrl()
+    harnessView.setVisible(false)
+    return
+  }
+  harnessMountRecoveryAttempts += 1
+  harnessMountRecoveryInFlight = true
+  authenticatedHarnessAdvertisedUrl = null
+  authenticatedHarnessTargetUrl = null
+  harnessLoader.setDesiredUrl(null)
+  harnessLoader.clearLoadedUrl()
+  void diagnostics.log(`官方 Web UI ${reason}，准备第 ${harnessMountRecoveryAttempts} 次自动重试`)
+  setTimeout(() => {
+    harnessMountRecoveryInFlight = false
+    if (runtime.getState().url === url) void loadHarness(url)
+  }, 300)
+}
+
+/**
+ * The DHS CLI advertises a one-time token URL. Electron's WebContentsView can
+ * complete the 303 response without persisting its Set-Cookie header, leaving
+ * the redirected root as an empty unauthenticated document. Exchange the token
+ * in the main process and install the cookie explicitly before loading `/`.
+ */
+async function authenticateHarnessUrl(url: string): Promise<string> {
+  if (harnessView === null) return url
+  try {
+    const parsed = new URL(url)
+    if (parsed.searchParams.get('token') === null) return url
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5_000) })
+    const setCookie = response.headers.get('set-cookie')
+    if (setCookie === null) throw new Error(`认证地址未返回 Cookie（HTTP ${response.status}）`)
+    const pair = setCookie.split(';', 1)[0]
+    const separator = pair.indexOf('=')
+    if (separator <= 0) throw new Error('认证 Cookie 格式无效')
+    const name = pair.slice(0, separator)
+    const value = pair.slice(separator + 1)
+    const maxAge = /(?:^|;)\s*max-age=(\d+)/i.exec(setCookie)?.[1]
+    const expires = /(?:^|;)\s*expires=([^;]+)/i.exec(setCookie)?.[1]
+    const expirationDate = maxAge !== undefined
+      ? Math.floor(Date.now() / 1000) + Number(maxAge)
+      : expires !== undefined ? Math.floor(Date.parse(expires) / 1000) : undefined
+    const cookies = await harnessView.webContents.session.cookies.get({ domain: parsed.hostname })
+    const staleCookies = cookies.filter(cookie => cookie.name.startsWith('dsh-auth-'))
+    const removalResults = await Promise.allSettled(staleCookies.map(cookie => harnessView!.webContents.session.cookies.remove(`${parsed.origin}/`, cookie.name)))
+    const failedRemovals = removalResults.filter(result => result.status === 'rejected').length
+    if (failedRemovals > 0) throw new Error(`清理过期认证 Cookie 失败（${failedRemovals}/${staleCookies.length}）`)
+    if (staleCookies.length > 0) {
+      void diagnostics.log(`已清理 ${staleCookies.length} 个过期 Harness 认证 Cookie`)
+    }
+    await harnessView.webContents.session.cookies.set({
+      url: parsed.origin,
+      name,
+      value,
+      path: '/',
+      httpOnly: true,
+      sameSite: 'strict',
+      ...(expirationDate === undefined || !Number.isFinite(expirationDate) ? {} : { expirationDate }),
+    })
+    void diagnostics.log(`已写入 Harness 认证 Cookie：${parsed.origin}`)
+    return parsed.origin + '/'
+  } catch (error) {
+    void diagnostics.log(`Harness 认证 Cookie 写入失败，已阻止本次页面加载：${error instanceof Error ? error.message : String(error)}`)
+    throw error
   }
 }
 
@@ -495,12 +774,6 @@ function queueMaintenance<T>(operation: () => Promise<T>): Promise<T> {
   const next = maintenanceQueue.then(operation, operation)
   maintenanceQueue = next.then(() => undefined, () => undefined)
   return next
-}
-
-async function checkForUpdateAndBroadcast(): Promise<UpdateStatus> {
-  const status = await updateService.check()
-  sendDesktopEvent('desktop:update-status', status)
-  return status
 }
 
 function knownRuntimeErrors(state: RuntimeState): string[] {
@@ -559,10 +832,16 @@ async function runRepairPipeline(): Promise<RepairReport> {
   try {
     await beginCheck('locks')
     const taskBoardLock = join(runtimePaths?.dshHome ?? '', 'task-board', 'ledger-v2.lock')
-    const cleaned = await cleanupStaleProcessLock(taskBoardLock, isWindowsProcessAlive)
-    if (cleaned) {
-      await beginRepair('locks', '发现任务板陈旧进程锁')
-      complete('locks', 'fixed', '已清理任务板陈旧进程锁')
+    const profilePatchLock = join(runtimePaths?.dshHome ?? '', 'profiles', 'web', 'cordis.patch.yml.lock')
+    const cleanedTaskBoard = await cleanupStaleProcessLock(taskBoardLock, isWindowsProcessAlive)
+    const cleanedProfilePatch = await cleanupStaleProcessLock(profilePatchLock, pid => isWindowsDshProcessAlive(pid, runtimePaths?.dshHome ?? ''))
+    if (cleanedTaskBoard || cleanedProfilePatch) {
+      const cleanedParts = [
+        ...(cleanedTaskBoard ? ['任务板'] : []),
+        ...(cleanedProfilePatch ? ['Web profile 补丁'] : []),
+      ]
+      await beginRepair('locks', `发现陈旧进程锁：${cleanedParts.join('、')}`)
+      complete('locks', 'fixed', `已清理${cleanedParts.join('、')}陈旧进程锁`)
     } else {
       complete('locks', 'ok', '未发现陈旧进程锁', '未发现问题')
     }
@@ -672,7 +951,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('desktop:get-status-panel-expanded', async (): Promise<boolean> => statusPanelExpanded)
   ipcMain.handle('desktop:repair-runtime', async (): Promise<RepairReport> => queueMaintenance(() => runRepairPipeline()))
-  ipcMain.handle('desktop:restart-desktop', async (): Promise<boolean> => {
+  ipcMain.handle('desktop:restart-desktop', async (): Promise<DesktopRestartResult> => {
     const confirmation = mainWindow !== null && !mainWindow.isDestroyed()
       ? await dialog.showMessageBox(mainWindow, {
         type: 'warning',
@@ -694,44 +973,35 @@ function registerIpc(): void {
         cancelId: 0,
         noLink: true,
       })
-    if (!shouldProceedWithDesktopRestart(confirmation.response)) return false
-    await restartDesktop({
+    if (!shouldProceedWithDesktopRestart(confirmation.response)) return { restarted: false, report: null }
+    const result = await restartDesktop({
+      verifyBeforeStop: async () => {
+        if (sessionDurability === null) throw new Error('会话持久化守卫尚未初始化')
+        return sessionDurability.verifyForRestart()
+      },
       stop: () => runtime.stop(),
+      verifyAfterStop: async () => {
+        if (sessionDurability === null) throw new Error('会话持久化守卫尚未初始化')
+        return sessionDurability.verifyForRestart()
+      },
+      resumeAfterBlockedStop: async () => { await startRuntime() },
       relaunch: scheduleDesktopRelaunch,
       // Exit only after the runtime is stopped and the detached helper is
       // waiting. This releases the single-instance lock before relaunching.
       exit: code => {
-        quitting = true
+        quitApproved = true
         mainWindow?.hide()
         app.exit(code)
       },
-      onStopError: error => void diagnostics.log(`桌面重启前停止 Harness 失败，将继续重启：${error instanceof Error ? error.message : String(error)}`),
+      onStopError: error => void diagnostics.log(`桌面重启前停止 Harness 失败，已取消重启：${error instanceof Error ? error.message : String(error)}`),
     })
-    return true
-  })
-  ipcMain.handle('desktop:check-update', async (): Promise<UpdateStatus> => checkForUpdateAndBroadcast())
-  ipcMain.handle('desktop:install-update', async (): Promise<UpdateStatus> => queueMaintenance(async () => {
-    const status = await updateService.install()
-    sendDesktopEvent('desktop:update-status', status)
-    profilePreparation = prepareActiveProfile()
-    await profilePreparation
-    await repairBundledAppDependencies()
-    await runtime.restart()
-    return status
-  }))
-  ipcMain.handle('desktop:sync-plugins', async () => queueMaintenance(async () => {
-    await runtime.stop()
-    try {
-      const status = await pluginManager.sync()
-      profilePreparation = prepareActiveProfile()
-      await profilePreparation
-      await startRuntime()
-      return status
-    } catch (error) {
-      await startAfterProfilePreparation(profilePreparation, startRuntime).catch(startError => diagnostics.log(`插件同步后恢复 Harness 失败：${startError instanceof Error ? startError.message : String(startError)}`))
-      throw error
+    if (!result.restarted && result.report !== null) {
+      for (const blocker of result.report.blockers) {
+        void diagnostics.log(`已取消桌面重启：会话 ${blocker.sessionId} 尚未完整保存（${blocker.reason}）`)
+      }
     }
-  }))
+    return result
+  })
 }
 
 if (!hasSingleInstanceLock) {
@@ -751,8 +1021,6 @@ if (!hasSingleInstanceLock) {
     await createWindow()
     installTray(app.getAppPath())
     installStatusPanelMenu()
-    void checkForUpdateAndBroadcast()
-    updateTimer = setInterval(() => { void checkForUpdateAndBroadcast() }, 24 * 60 * 60 * 1_000)
     await startAfterProfilePreparation(profilePreparation, startRuntime).catch(error => {
       const message = error instanceof Error ? error.message : String(error)
       void diagnostics.log(`启动失败：${message}`)
@@ -780,11 +1048,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-let quitting = false
 app.on('before-quit', event => {
-  if (quitting || runtime === undefined) return
+  if (quitApproved || runtime === undefined) return
   event.preventDefault()
-  quitting = true
-  if (updateTimer !== null) clearInterval(updateTimer)
-  void runtime.stop().finally(() => app.quit())
+  void requestSafeDesktopExit()
 })

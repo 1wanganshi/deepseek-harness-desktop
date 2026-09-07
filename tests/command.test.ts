@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { bundledPnpmScript, runCommand } from '../src/main/command.js'
+import { bundledNpmDepsPath, bundledNpmScript, bundledPnpmScript, runCommand } from '../src/main/command.js'
 
 const node = process.execPath
 
@@ -43,12 +45,85 @@ describe('runCommand', () => {
       { maxOutputChars: 5_000 },
     )).rejects.toThrow(/failed with code 1/)
   })
+
+  it('loads a preloader from a Windows path with spaces set through NODE_OPTIONS', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'dsh npm loader '))
+    const loader = join(fixture, 'loader.cjs')
+    const marker = join(fixture, 'loaded.txt')
+    try {
+      await writeFile(loader, "require('node:fs').writeFileSync(process.env.DSH_TEST_PRELOAD_MARKER, 'loaded')")
+      await runCommand(
+        node,
+        ['-e', "if (!require('node:fs').existsSync(process.env.DSH_TEST_PRELOAD_MARKER)) process.exit(9)"],
+        process.cwd(),
+        {
+          ...process.env,
+          DSH_TEST_PRELOAD_MARKER: marker,
+          NODE_OPTIONS: `--require=${loader}`,
+        },
+      )
+      await expect(readFile(marker, 'utf8')).resolves.toBe('loaded')
+    } finally {
+      await rm(fixture, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves ESM npm dependencies from the renamed dependency tree', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'dsh npm esm '))
+    const dependencyRoot = join(fixture, 'npm-deps')
+    const packageRoot = join(dependencyRoot, 'deps', 'chalk')
+    const workingDirectory = join(fixture, 'work')
+    try {
+      await mkdir(packageRoot, { recursive: true })
+      await mkdir(workingDirectory, { recursive: true })
+      await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+        name: 'chalk',
+        type: 'module',
+        exports: './index.js',
+      }))
+      await writeFile(join(packageRoot, 'index.js'), "export default 'resolved-from-npm-deps'\n")
+      await runCommand(
+        node,
+        ['--input-type=module', '-e', "const mod = await import('chalk'); if (mod.default !== 'resolved-from-npm-deps') process.exit(9)"],
+        workingDirectory,
+        {
+          ...process.env,
+          DSH_NPM_DEPS: dependencyRoot,
+          NODE_OPTIONS: `--require=${join(process.cwd(), 'resources', 'npm-loader.cjs')}`,
+        },
+      )
+    } finally {
+      await rm(fixture, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('bundledPnpmScript', () => {
   it('points at the pnpm binary shipped in app dependencies', () => {
     expect(bundledPnpmScript('C:/app/root')).toBe(
       join('C:/app/root', 'node_modules', 'pnpm', 'bin', 'pnpm.mjs'),
+    )
+  })
+})
+
+describe('bundledNpmScript', () => {
+  it('points at the npm CLI shipped in app dependencies', () => {
+    expect(bundledNpmScript('C:/app/root')).toBe(
+      join('C:/app/root', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    )
+  })
+
+  it('can point at the complete npm copy shipped beside the app', () => {
+    expect(bundledNpmScript('C:/app/root', 'C:/app/resources')).toBe(
+      join('C:/app/resources', 'npm', 'bin', 'npm-cli.js'),
+    )
+  })
+})
+
+describe('bundledNpmDepsPath', () => {
+  it('points at the dependency directory beside the packaged npm CLI', () => {
+    expect(bundledNpmDepsPath('C:/app/resources')).toBe(
+      join('C:/app/resources', 'npm-deps'),
     )
   })
 })

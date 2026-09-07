@@ -10,7 +10,6 @@ export class DiagnosticsStore {
   private readonly dshHome: string
   private readonly getState: () => RuntimeState
   private readonly getDesktopVersion: () => string
-  private readonly getUpdate: () => { latestVersion: string | null; updateAvailable: boolean }
   private readonly getMigration: () => LegacyMigrationStatus
   private readonly getProjectSessionMerge: () => ProjectSessionMergeStatus
 
@@ -20,7 +19,6 @@ export class DiagnosticsStore {
     dshHome: string
     getState: () => RuntimeState
     getDesktopVersion?: () => string
-    getUpdate: () => { latestVersion: string | null; updateAvailable: boolean }
     getMigration?: () => LegacyMigrationStatus
     getProjectSessionMerge?: () => ProjectSessionMergeStatus
   }) {
@@ -29,7 +27,6 @@ export class DiagnosticsStore {
     this.dshHome = options.dshHome
     this.getState = options.getState
     this.getDesktopVersion = options.getDesktopVersion ?? (() => 'unknown')
-    this.getUpdate = options.getUpdate
     this.getMigration = options.getMigration ?? (() : LegacyMigrationStatus => ({
       status: 'not-found',
       legacyHome: '',
@@ -63,7 +60,6 @@ export class DiagnosticsStore {
   async snapshot(): Promise<RuntimeDiagnostics> {
     const recentLogs = await this.readRecentLogs()
     const pluginNames = await this.readPluginNames()
-    const update = this.getUpdate()
     return {
       state: this.getState(),
       desktopVersion: this.getDesktopVersion(),
@@ -72,8 +68,6 @@ export class DiagnosticsStore {
       recentLogs,
       pluginCount: pluginNames.length,
       pluginNames,
-      latestVersion: update.latestVersion,
-      updateAvailable: update.updateAvailable,
       migration: this.getMigration(),
       projectSessionMerge: this.getProjectSessionMerge(),
     }

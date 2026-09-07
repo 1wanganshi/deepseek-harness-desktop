@@ -28,6 +28,24 @@ afterEach(async () => {
 })
 
 describe('mergeLegacyProjectSessions', () => {
+  it('replaces a legacy imported workspace id with the canonical id', async () => {
+    const { legacyHome, targetHome, backupRoot } = await setup()
+    const project = 'D:\\vibecoding\\DHS1'
+    const id = 'import-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    await writeSession(legacyHome, id, project, 'DHS1 imported')
+    await mkdir(join(legacyHome, 'storages'), { recursive: true })
+    await writeFile(join(legacyHome, 'storages', 'workspace.json'), JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { workspaceIds: ['workspace-dhs1'] },
+      tables: { workspaces: { 'workspace-dhs1': { path: project, title: 'DHS1', sessionIds: [id] } } },
+    }), 'utf8')
+
+    await mergeLegacyProjectSessions({ legacyHome, targetHome, projectCwd: project, backupRoot })
+
+    const workspace = JSON.parse(await readFile(join(targetHome, 'storages', 'workspace.json'), 'utf8'))
+    expect(workspace.tables.workspaces['workspace-dhs1'].sessionIds).toEqual([`session-${id}`])
+  })
+
   it('restores the matching workspace mapping and session ids', async () => {
     const { legacyHome, targetHome, backupRoot } = await setup()
     const project = 'D:\\vibecoding\\DHS1'

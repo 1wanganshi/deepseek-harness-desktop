@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DesktopApi, PluginStatus, RepairReport, RuntimeDiagnostics, RuntimeState, UpdateStatus } from './shared/types.js'
+import type { DesktopApi, RepairReport, RuntimeDiagnostics, RuntimeState } from './shared/types.js'
+import type { DesktopRestartResult } from './main/desktop-restart.js'
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke('desktop:get-snapshot') as Promise<RuntimeDiagnostics>,
@@ -10,19 +11,11 @@ const api: DesktopApi = {
   setStatusPanelExpanded: (expanded: boolean) => ipcRenderer.invoke('desktop:set-status-panel-expanded', expanded) as Promise<void>,
   getStatusPanelExpanded: () => ipcRenderer.invoke('desktop:get-status-panel-expanded') as Promise<boolean>,
   repairRuntime: () => ipcRenderer.invoke('desktop:repair-runtime') as Promise<RepairReport>,
-  restartDesktop: () => ipcRenderer.invoke('desktop:restart-desktop') as Promise<boolean>,
-  checkForUpdate: () => ipcRenderer.invoke('desktop:check-update') as Promise<UpdateStatus>,
-  installUpdate: () => ipcRenderer.invoke('desktop:install-update') as Promise<UpdateStatus>,
-  syncPlugins: () => ipcRenderer.invoke('desktop:sync-plugins') as Promise<PluginStatus>,
+  restartDesktop: () => ipcRenderer.invoke('desktop:restart-desktop') as Promise<DesktopRestartResult>,
   onRuntimeState: (listener) => {
     const callback = (_event: Electron.IpcRendererEvent, state: RuntimeState) => listener(state)
     ipcRenderer.on('desktop:runtime-state', callback)
     return () => ipcRenderer.removeListener('desktop:runtime-state', callback)
-  },
-  onUpdateState: (listener) => {
-    const callback = (_event: Electron.IpcRendererEvent, status: UpdateStatus) => listener(status)
-    ipcRenderer.on('desktop:update-status', callback)
-    return () => ipcRenderer.removeListener('desktop:update-status', callback)
   },
   onStatusPanelExpanded: (listener) => {
     const callback = (_event: Electron.IpcRendererEvent, expanded: boolean) => listener(expanded)

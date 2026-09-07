@@ -1,5 +1,6 @@
 import type { LegacyMigrationStatus } from '../main/migration.js'
 import type { ProjectSessionMergeStatus } from '../main/session-merge.js'
+import type { DesktopRestartResult } from '../main/desktop-restart.js'
 
 export type RuntimeStatus = 'starting' | 'running' | 'recovering' | 'stopped' | 'error'
 
@@ -21,8 +22,6 @@ export interface RuntimeDiagnostics {
   recentLogs: string[]
   pluginCount: number
   pluginNames: string[]
-  latestVersion: string | null
-  updateAvailable: boolean
   migration: LegacyMigrationStatus
   projectSessionMerge: ProjectSessionMergeStatus
 }
@@ -48,6 +47,8 @@ export interface RepairReport {
   state: RuntimeState
 }
 
+/** Legacy shape kept for isolated compatibility tests; the desktop API no
+ * longer exposes online update operations. */
 export interface UpdateStatus {
   currentVersion: string
   latestVersion: string | null
@@ -58,9 +59,12 @@ export interface UpdateStatus {
 
 export interface PluginStatus {
   profilePath: string
+  activeProfilePath: string
+  lastKnownGoodProfilePath: string | null
   names: string[]
   canSync: boolean
   lastSyncedAt: string | null
+  phase: 'idle' | 'updating' | 'validated' | 'rolled-back' | 'failed'
   error: string | null
 }
 
@@ -73,12 +77,8 @@ export interface DesktopApi {
   setStatusPanelExpanded: (expanded: boolean) => Promise<void>
   getStatusPanelExpanded: () => Promise<boolean>
   repairRuntime: () => Promise<RepairReport>
-  restartDesktop: () => Promise<boolean>
-  checkForUpdate: () => Promise<UpdateStatus>
-  installUpdate: () => Promise<UpdateStatus>
-  syncPlugins: () => Promise<PluginStatus>
+  restartDesktop: () => Promise<DesktopRestartResult>
   onRuntimeState: (listener: (state: RuntimeState) => void) => () => void
-  onUpdateState: (listener: (status: UpdateStatus) => void) => () => void
   onStatusPanelExpanded: (listener: (expanded: boolean) => void) => () => void
   onRepairProgress: (listener: (report: RepairReport) => void) => () => void
 }

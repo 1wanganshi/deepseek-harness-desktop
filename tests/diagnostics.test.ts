@@ -15,7 +15,6 @@ describe('diagnostics store', () => {
       getRuntimeRoot: () => runtimeRoot,
       dshHome,
       getState: () => ({ status: 'running', version: '0.1.0', port: 3000, url: 'http://127.0.0.1:3000', recoveryAttempt: 0, lastError: null, lastHealthyAt: null }),
-      getUpdate: () => ({ latestVersion: null, updateAvailable: false }),
     })
 
     runtimeRoot = join(root, 'runtime-new')

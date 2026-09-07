@@ -1,25 +1,14 @@
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { RuntimePaths } from './runtime-paths.js'
+import { writeActiveRuntimePointer, type RuntimePaths } from './runtime-paths.js'
 import type { UpdateStatus } from '../shared/types.js'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh'
 const REGISTRY_URL = 'https://registry.npmjs.org/@deepseek-ai%2fdsh/latest'
-const CANDIDATE_PNPM_POLICY = `allowBuilds:
-  '@deepseek-ai/dsh-subprocess-local': true
-  '@google/genai': true
-  core-js: true
-  esbuild: true
-  koffi: true
-  node-pty: true
-  onnxruntime-node: true
-  protobufjs: true
-`
-
 export interface OfficialUpdateOptions {
   paths: RuntimePaths
   currentVersion: () => Promise<string>
-  runPnpm: (cwd: string, args: string[]) => Promise<void>
+  runNpm: (cwd: string, args: string[]) => Promise<void>
   healthValidate?: (candidateRoot: string) => Promise<boolean>
   fetchImpl?: typeof fetch
 }
@@ -77,33 +66,43 @@ export class OfficialUpdateService {
       throw new Error('无效的官方 DSH 版本号')
     }
     const candidate = join(this.options.paths.userRuntimeRoot, 'versions', `dsh-${version}`)
-    await rm(candidate, { recursive: true, force: true })
-    await mkdir(candidate, { recursive: true })
-    await writeFile(join(candidate, 'package.json'), JSON.stringify({
-      name: 'dsh-managed-runtime',
-      private: true,
-      dependencies: { [PACKAGE_NAME]: version },
-    }, null, 2))
-    await writeFile(join(candidate, 'pnpm-workspace.yaml'), CANDIDATE_PNPM_POLICY)
-    await this.options.runPnpm(candidate, ['install', '--no-frozen-lockfile'])
-    await access(join(candidate, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
-    if (!await healthValidate(candidate)) {
-      throw new Error('Candidate health validation failed; active runtime was kept')
-    }
+    try {
+      // Never destroy an existing candidate. Preserve it as evidence if a
+      // retry is needed, then build the new candidate from an empty directory.
+      try {
+        await access(candidate)
+        await rename(candidate, `${candidate}.previous-${Date.now()}`)
+      } catch {
+        // Candidate does not exist yet.
+      }
+      await mkdir(candidate, { recursive: true })
+      await writeFile(join(candidate, 'package.json'), JSON.stringify({
+        name: 'dsh-managed-runtime',
+        private: true,
+        dependencies: { [PACKAGE_NAME]: version },
+      }, null, 2))
+      await this.options.runNpm(candidate, ['install', '--no-audit', '--no-fund', '--loglevel=warn'])
+      await access(join(candidate, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+      if (!await healthValidate(candidate)) {
+        throw new Error('Candidate health validation failed; active runtime was kept')
+      }
 
-    const activePointer = this.options.paths.pointerPath
-    const pointerTemp = `${activePointer}.tmp`
-    await writeFile(pointerTemp, JSON.stringify({ root: candidate, version }, null, 2))
-    await rm(activePointer, { force: true })
-    await rename(pointerTemp, activePointer)
-    this.status = {
-      ...this.status,
-      currentVersion: version,
-      latestVersion: version,
-      updateAvailable: false,
-      error: null,
+      await writeActiveRuntimePointer(this.options.paths, { root: candidate, version })
+      await rm(this.options.paths.updateFailurePath ?? join(this.options.paths.userRuntimeRoot, 'update-failure.json'), { force: true })
+      this.status = {
+        ...this.status,
+        currentVersion: version,
+        latestVersion: version,
+        updateAvailable: false,
+        error: null,
+      }
+      return this.getStatus()
+    } catch (error) {
+      this.status = { ...this.status, error: error instanceof Error ? error.message : String(error) }
+      const failurePath = this.options.paths.updateFailurePath ?? join(this.options.paths.userRuntimeRoot, 'update-failure.json')
+      await writeFile(failurePath, JSON.stringify({ version, candidate, detail: this.status.error, recordedAt: new Date().toISOString() }, null, 2), 'utf8')
+      throw error
     }
-    return this.getStatus()
   }
 }
 

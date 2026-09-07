@@ -87,19 +87,69 @@ describe('legacy DSH migration', () => {
     await expect(stat(status.backupPath!)).resolves.toBeDefined()
   })
 
-  it('does not migrate a second time after a successful marker is written', async () => {
+  it('reconciles newly added legacy models and plugins after the initial migration without overwriting desktop choices', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-migration-marker-'))
     const legacyHome = join(root, 'legacy')
     const targetHome = join(root, 'target')
-    await mkdir(legacyHome, { recursive: true })
-    await writeFile(join(legacyHome, 'settings.yaml'), 'agent-default-model:\n  model: first\n')
+    const legacyProfile = join(legacyHome, 'profiles', 'web')
+    await mkdir(legacyProfile, { recursive: true })
+    await writeFile(join(legacyHome, 'settings.yaml'), [
+      'agent-default-model:',
+      '  provider: legacy-provider',
+      '  model: first',
+      'llm-pi-ai:',
+      '  providers:',
+      '    legacy-provider:',
+      '      models:',
+      '        - id: first',
+      '',
+    ].join('\n'))
+    await writeFile(join(legacyProfile, 'package.json'), JSON.stringify({
+      dependencies: { 'legacy-plugin': '1.0.0' },
+      dsh: { profile: { bundles: ['legacy-plugin'] } },
+    }))
 
     const first = await migrateLegacyDsh({ legacyHome, targetHome, backupRoot: join(root, 'backups') })
-    await writeFile(join(legacyHome, 'settings.yaml'), 'agent-default-model:\n  model: second\n')
+    await writeFile(join(targetHome, 'settings.yaml'), [
+      'agent-default-model:',
+      '  provider: desktop-provider',
+      '  model: desktop-model',
+      'llm-pi-ai:',
+      '  providers:',
+      '    desktop-provider:',
+      '      models:',
+      '        - id: desktop-model',
+      '',
+    ].join('\n'))
+    await writeFile(join(legacyHome, 'settings.yaml'), [
+      'agent-default-model:',
+      '  provider: legacy-provider',
+      '  model: second',
+      'llm-pi-ai:',
+      '  providers:',
+      '    legacy-provider:',
+      '      models:',
+      '        - id: first',
+      '        - id: second',
+      '',
+    ].join('\n'))
+    await writeFile(join(legacyProfile, 'package.json'), JSON.stringify({
+      dependencies: { 'legacy-plugin': '1.0.0', 'browser-plugin': 'file:C:/plugins/browser' },
+      dsh: { profile: { bundles: ['legacy-plugin', 'browser-plugin'] } },
+    }))
     const second = await migrateLegacyDsh({ legacyHome, targetHome, backupRoot: join(root, 'backups') })
 
     expect(first.status).toBe('migrated')
-    expect(second.status).toBe('already-migrated')
-    await expect(readFile(join(targetHome, 'settings.yaml'), 'utf8')).resolves.toContain('first')
+    expect(second.status).toBe('synchronized')
+    const settings = await readFile(join(targetHome, 'settings.yaml'), 'utf8')
+    expect(settings).toContain('desktop-model')
+    expect(settings).toContain('legacy-provider')
+    expect(settings).toContain('id: second')
+    const profile = JSON.parse(await readFile(join(targetHome, 'profiles', 'web', 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      dsh: { profile: { bundles: string[] } }
+    }
+    expect(profile.dependencies).toMatchObject({ 'legacy-plugin': '1.0.0', 'browser-plugin': 'file:C:/plugins/browser' })
+    expect(profile.dsh.profile.bundles).toEqual(expect.arrayContaining(['legacy-plugin', 'browser-plugin']))
   })
 })

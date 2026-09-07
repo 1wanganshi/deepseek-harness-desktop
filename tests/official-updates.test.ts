@@ -21,7 +21,7 @@ describe('official DSH update service', () => {
     const service = new OfficialUpdateService({
       paths,
       currentVersion: async () => '0.1.0',
-      runPnpm: async () => undefined,
+      runNpm: async () => undefined,
       fetchImpl: async () => new Response(JSON.stringify({ version: '0.2.0' }), { status: 200 }),
     })
 
@@ -40,7 +40,7 @@ describe('official DSH update service', () => {
     const service = new OfficialUpdateService({
       paths,
       currentVersion: async () => '0.1.0',
-      runPnpm: async (cwd) => {
+      runNpm: async (cwd) => {
         await mkdir(join(cwd, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
         await writeFile(join(cwd, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '')
       },
@@ -57,17 +57,17 @@ describe('official DSH update service', () => {
     const service = new OfficialUpdateService({
       paths,
       currentVersion: async () => '0.1.0',
-      runPnpm: async (cwd) => {
-        candidatePolicy = await readFile(join(cwd, 'pnpm-workspace.yaml'), 'utf8')
+      runNpm: async (cwd, args) => {
+        candidatePolicy = await readFile(join(cwd, 'package.json'), 'utf8')
+        expect(args).toEqual(['install', '--no-audit', '--no-fund', '--loglevel=warn'])
         await mkdir(join(cwd, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
         await writeFile(join(cwd, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'), '')
       },
     })
 
     await service.install('0.2.0', async (root) => root.endsWith('dsh-0.2.0'))
-    expect(candidatePolicy).toContain('allowBuilds:')
-    expect(candidatePolicy).toContain("'@google/genai': true")
-    expect(candidatePolicy).toContain('koffi: true')
+    expect(candidatePolicy).toContain('dsh-managed-runtime')
+    await expect(readFile(join(paths.userRuntimeRoot, 'versions', 'dsh-0.2.0', 'pnpm-workspace.yaml'), 'utf8')).rejects.toThrow()
     await expect(readFile(paths.pointerPath, 'utf8')).resolves.toMatch(/"version": "0.2.0"/)
   })
 })

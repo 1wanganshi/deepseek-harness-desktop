@@ -5,6 +5,17 @@ export function bundledPnpmScript(appRoot: string): string {
   return join(appRoot, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
 }
 
+export function bundledNpmScript(appRoot: string, resourcesRoot?: string): string {
+  const npmRoot = resourcesRoot === undefined
+    ? join(appRoot, 'node_modules', 'npm')
+    : join(resourcesRoot, 'npm')
+  return join(npmRoot, 'bin', 'npm-cli.js')
+}
+
+export function bundledNpmDepsPath(resourcesRoot: string): string {
+  return join(resourcesRoot, 'npm-deps')
+}
+
 export interface RunCommandOptions {
   /** Milliseconds after which the child is killed and the promise rejects. */
   timeoutMs?: number
@@ -14,6 +25,20 @@ export interface RunCommandOptions {
 
 const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000
+
+function normalizeNodeOptions(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const nodeOptions = env.NODE_OPTIONS
+  if (nodeOptions === undefined) return env
+  return {
+    ...env,
+    // NODE_OPTIONS tokenizes Windows paths before Node loads the preloader.
+    // Quote and slash-normalize a final --require path that contains spaces.
+    NODE_OPTIONS: nodeOptions.replace(/--require=([^"\r\n]+)$/, (option, loaderPath: string) => {
+      if (!loaderPath.includes(' ')) return option
+      return `--require="${loaderPath.replaceAll('\\', '/')}"`
+    }),
+  }
+}
 
 function terminateProcessTree(child: ChildProcess): void {
   if (child.exitCode !== null || child.killed) return
@@ -44,7 +69,7 @@ export function runCommand(
 
     const child = spawn(command, args, {
       cwd,
-      env,
+      env: normalizeNodeOptions(env),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       shell: false,

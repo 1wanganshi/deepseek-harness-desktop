@@ -192,7 +192,17 @@ async function buildWorkspaceMergePlan(
   const existingSessionIds = Array.isArray(currentWorkspace.sessionIds)
     ? (currentWorkspace.sessionIds as unknown[]).filter((id): id is string => typeof id === 'string')
     : []
-  const mergedSessionIds = [...existingSessionIds]
+  const sourceIds = new Set(sessionIds)
+  const mergedSessionIds: string[] = []
+  const seenSessionIds = new Set<string>()
+  let sessionLinksNormalized = false
+  for (const existingId of existingSessionIds) {
+    const key = sourceIds.has(existingId) ? `session-${existingId}` : existingId
+    if (seenSessionIds.has(key)) continue
+    seenSessionIds.add(key)
+    mergedSessionIds.push(key)
+    if (key !== existingId) sessionLinksNormalized = true
+  }
   let sessionIdsAdded = 0
   for (const id of sessionIds) {
     const key = `session-${id}`
@@ -213,7 +223,7 @@ async function buildWorkspaceMergePlan(
   const nextValue = isRecord(targetValue) ? targetValue : {}
   nextValue.global = targetParts.global
   nextValue.tables = targetParts.tables
-  const changed = targetEntry === undefined || sessionIdsAdded > 0 || !hadWorkspaceId
+  const changed = targetEntry === undefined || sessionIdsAdded > 0 || !hadWorkspaceId || sessionLinksNormalized || mergedSessionIds.length !== existingSessionIds.length
   return { sourcePath, targetPath, nextValue, targetExists, workspaceId, sessionIdsAdded, changed }
 }
 

@@ -9,12 +9,41 @@ export interface PrepareOfficialWebProfileOptions {
   nodeModulesPresent: boolean
   dependencyInstallRequired: boolean
   lockfilePresent: boolean
+  runtimeVersion?: string
   install: (args: string[]) => Promise<void>
 }
 
 export interface PrepareOfficialWebProfileResult {
   compatibilityChanged: boolean
   rebuiltDependencies: boolean
+}
+
+/**
+ * Returns declared runtime dependencies whose package directories are absent.
+ * A profile can retain a valid lockfile while its materialized tree is
+ * incomplete (for example after an interrupted update), so the lockfile alone
+ * cannot be used as the startup readiness check.
+ */
+export async function hasMissingProfileDependencies(profilePath: string): Promise<string[]> {
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(await readFile(join(profilePath, 'package.json'), 'utf8'))
+  } catch {
+    return []
+  }
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) return []
+  const dependencies = (manifest as { dependencies?: unknown }).dependencies
+  if (typeof dependencies !== 'object' || dependencies === null || Array.isArray(dependencies)) return []
+  const nodeModulesPath = join(profilePath, 'node_modules')
+  const missing: string[] = []
+  for (const name of Object.keys(dependencies as Record<string, unknown>)) {
+    try {
+      await access(join(nodeModulesPath, ...name.split('/')))
+    } catch {
+      missing.push(name)
+    }
+  }
+  return missing.sort()
 }
 
 /**
@@ -35,6 +64,7 @@ export async function prepareOfficialWebProfile(
       dshHome: options.dshHome,
       profilePath: options.profilePath,
       packagePath: options.packagePath,
+      runtimeVersion: options.runtimeVersion,
     })
     compatibilityChanged = compatibility.changed
     const shouldInstall = options.dependencyInstallRequired
@@ -43,7 +73,7 @@ export async function prepareOfficialWebProfile(
     if (!shouldInstall) return { compatibilityChanged, rebuiltDependencies: false }
 
     const args = ['install']
-    args.push(options.lockfilePresent && !compatibility.changed
+    args.push(options.lockfilePresent && !compatibility.changed && !options.dependencyInstallRequired
       ? '--frozen-lockfile'
       : '--no-frozen-lockfile')
 

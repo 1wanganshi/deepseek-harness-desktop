@@ -63,12 +63,7 @@ button { font: inherit; }
 .bar-spacer { flex: 1; }
 .top-notice { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #92a0b2; font-size: 11px; }
 .version { color: #9aa7ba; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; margin-left: 5px; }
-.update-state { display: inline-flex; align-items: center; gap: 5px; color: #7f8c9f; font-size: 10px; white-space: nowrap; }
-.update-chip, .primary-button, .secondary-button, .icon-button { border: 1px solid transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; transition: .16s ease; }
-.update-chip { color: #d6f7bd; background: rgba(159, 232, 112, .1); border-color: rgba(159, 232, 112, .28); border-radius: 7px; padding: 6px 9px; font-size: 10px; }
-.update-chip.has-update { color: #fff4d0; background: rgba(243, 188, 92, .14); border-color: rgba(243, 188, 92, .5); }
-.update-chip-icon { position: relative; display: inline-flex; }
-.update-dot { position: absolute; top: -3px; right: -3px; width: 5px; height: 5px; border-radius: 50%; background: #ff6c78; box-shadow: 0 0 0 2px #10141d; }
+.primary-button, .secondary-button, .icon-button { border: 1px solid transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; transition: .16s ease; }
 .primary-button, .secondary-button { border-radius: 7px; padding: 8px 11px; font-size: 11px; font-weight: 650; }
 .primary-button { color: #081008; background: #9fe870; }
 .secondary-button { color: #cad4e1; background: #1b212d; border-color: #303847; }
@@ -108,20 +103,6 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .repair-plan-item.failed .repair-plan-icon, .repair-plan-item.failed .repair-plan-status { color: #ff9098; border-color: rgba(255, 108, 120, .45); }
 .repair-plan-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 13px; padding-top: 12px; border-top: 1px solid #252d39; color: #7f8c9f; font-size: 10px; }
 
-.modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(5, 7, 11, .68); backdrop-filter: blur(8px); }
-.confirm-dialog { width: min(390px, 100%); padding: 20px; background: #111720; border: 1px solid #3a4656; border-radius: 10px; box-shadow: 0 24px 70px rgba(0, 0, 0, .52); }
-.confirm-dialog-heading { display: flex; justify-content: space-between; align-items: flex-start; }
-.confirm-dialog-icon { width: 36px; height: 36px; display: grid; place-items: center; color: #9fe870; background: rgba(159, 232, 112, .1); border: 1px solid rgba(159, 232, 112, .25); border-radius: 8px; }
-.confirm-dialog-icon.attention { color: #f3bc5c; background: rgba(243, 188, 92, .1); border-color: rgba(243, 188, 92, .35); }
-.confirm-dialog-icon.danger { color: #ff9098; background: rgba(255, 108, 120, .1); border-color: rgba(255, 108, 120, .35); }
-.confirm-dialog h2 { margin: 18px 0 8px; color: #edf2f7; font-size: 18px; }
-.confirm-dialog p { margin: 0; color: #9aa7ba; font-size: 12px; line-height: 1.6; }
-.update-dialog-method { display: grid; gap: 5px; margin-top: 15px; padding: 10px 11px; background: #18202c; border: 1px solid #2c3747; border-radius: 7px; }
-.update-dialog-method span { color: #7f8c9f; font-size: 9px; }
-.update-dialog-method strong { color: #dce5ef; font-size: 11px; line-height: 1.45; }
-.update-dialog-progress { display: flex; align-items: center; gap: 7px; margin-top: 16px; color: #f3bc5c; font-size: 11px; }
-.confirm-dialog .text-button { margin-top: 15px; }
-.confirm-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 
 .diagnostics-page { min-height: 100vh; padding: 42px 48px; background: radial-gradient(circle at 78% 0%, rgba(58, 85, 111, .2), transparent 35%), #0b0e14; }
 .diagnostics-heading { max-width: 980px; margin: 0 auto 30px; display: flex; justify-content: space-between; align-items: flex-start; }
