@@ -166,7 +166,7 @@ function ControlBar(): ReactElement {
       <div className="brand-lockup">
         <div className="brand-mark"><Cpu size={13} strokeWidth={2.4} /></div>
         <div>
-          <div className="brand-name">DeepSeek Harness <span className="version">桌面端 v{desktopVersion}</span></div>
+          <div className="brand-name">王安实定制 DHS <span className="version">桌面端 v{desktopVersion}</span></div>
           <div className="brand-subtitle">官方 DHS v{state.version}</div>
         </div>
       </div>
