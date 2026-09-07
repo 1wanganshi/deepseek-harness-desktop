@@ -9,7 +9,7 @@ The desktop shell does not reimplement the official Harness UI. It starts the of
 - Bundled Node runtime for click-to-run installation.
 - Separate `DSH_HOME` under Electron user data; the desktop shell never reads or logs API keys.
 - Local-only navigation, isolated preload IPC, and a single-instance desktop lock.
-- Windows notification-area tray icon: minimize and window close hide the app while the Harness keeps running; the tray menu can reopen the window or exit cleanly.
+- Windows notification-area tray icon: window close hides the app while the Harness keeps running; minimize keeps the window on the taskbar; the tray menu can reopen the window or exit cleanly.
 - Windows AppUserModelId, branded `.ico`, NSIS registration, and desktop/Start Menu shortcuts make the package a normal identifiable Windows application.
 - Startup health check, five-second heartbeat, child-process exit monitoring, bounded exponential recovery, and Windows process-tree cleanup.
 - Immutable bundled DSH runtime: the desktop never switches to an online candidate at startup or in the background. A new DSH version is delivered as a newly built installer, so every user runs the exact tested bundle.
