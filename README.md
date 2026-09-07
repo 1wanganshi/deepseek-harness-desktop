@@ -26,6 +26,16 @@ Open the installed app, then use the official Harness setup screen to configure 
 
 Remote model congestion cannot be eliminated by a desktop wrapper. The desktop improves local continuity and recovery; provider retries and alternate providers still depend on what is configured in the official Harness Settings → Models screen.
 
+## 0.2.24 版本介绍
+
+- **会话持久化加固**：新增 `session-durability` 模块，启动时自动恢复丢失的会话索引，把"孤儿会话"重新挂回所属工作区，并按日期保留安全快照，历史会话不会因索引损坏而消失。
+- **配置持久化保护**：新增 `configuration-durability` 模块，对 `settings.yaml`、`.credentials.yaml` 和 Web profile 依赖清单做快照保护，模型 Provider 与密钥配置异常时可从本地安全快照自动恢复。
+- **启动恢复强化**：启动预检自动清理任务板陈旧进程锁、过期 Harness 认证 Cookie 与失效的 profile 回退链接；缺失的 profile 依赖会自动重建；当官方 Harness 版本低于任务板插件要求时自动禁用不兼容入口（插件文件与配置保留）。
+- **最小化行为修复**：最小化时窗口正常保留在任务栏（与普通 Windows 应用一致）；仅点击关闭按钮时收进系统托盘，后台 Harness 继续运行。
+- **打包完整性补丁**：新增 `scripts/patch-bundled-runtime.mjs`，打包后自动补全被依赖收集器遗漏的官方运行时包（`dsh-jobs`、`dsh-settings`、`dsh-bash-local`、`dsh-client-runtime`、`dsh-host-apiproxy`、`dsh-tool-subagent-report`、`dsh-authorization`），修复独立安装后设置页无法加载大模型配置的问题。
+- **插件加载器**：新增 `resources/npm-loader.cjs`，为 Web profile 插件提供统一的模块解析入口，降低第三方插件因依赖解析失败导致的加载降级。
+- **质量基线**：37 个测试文件、135 个用例全部通过，`pnpm typecheck` 无错误。
+
 ## Development
 
 ```powershell
