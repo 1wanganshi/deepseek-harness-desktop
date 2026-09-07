@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-renderer/
+dist-electron/
+release/
+resources/node/
+resources/npm/
+resources/npm-deps/
+runtime/
+coverage/
+.env
