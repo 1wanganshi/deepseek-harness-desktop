@@ -11,8 +11,8 @@ describe('desktop shell window lifecycle', () => {
     expect(shouldHideOnClose({ platform: 'darwin', quitting: false })).toBe(false)
   })
 
-  it('minimizes to the Windows notification area', () => {
-    expect(shouldHideOnMinimize('win32')).toBe(true)
+  it('keeps the window on the taskbar when minimized', () => {
+    expect(shouldHideOnMinimize('win32')).toBe(false)
     expect(shouldHideOnMinimize('darwin')).toBe(false)
   })
 })

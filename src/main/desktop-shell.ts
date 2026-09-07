@@ -5,5 +5,5 @@ export function shouldHideOnClose(options: { platform: DesktopPlatform; quitting
 }
 
 export function shouldHideOnMinimize(platform: DesktopPlatform): boolean {
-  return platform === 'win32'
+  return false
 }
