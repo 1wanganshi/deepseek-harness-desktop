@@ -14,7 +14,7 @@ import { readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
 import { hasMissingProfileDependencies, prepareOfficialWebProfile } from './profile-preparation.js'
 import { ensureClientStoreCompatibility, ensureVisionRouterCompatibility, synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
-import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile } from './incompatible-plugins.js'
+import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile, migratePersonaPresetSchema } from './incompatible-plugins.js'
 import { RuntimeController } from './runtime-controller.js'
 import { createRuntimePaths, ensureRuntimeDirectories, resolveBundledRuntime, type ResolvedRuntime } from './runtime-paths.js'
 import { cleanupStaleProcessLock, isWindowsDshProcessAlive, isWindowsProcessAlive } from './stale-locks.js'
@@ -333,6 +333,10 @@ async function prepareWebProfile(options: {
     }
     if (mitigation.taskBoardDisabled) {
       void diagnostics.log('当前官方 Harness 版本低于任务板插件要求，已禁用不兼容入口；插件文件和配置仍保留')
+    }
+    const personaMigration = await migratePersonaPresetSchema({ dshHome: paths.dshHome, profilePath })
+    if (personaMigration.changed) {
+      void diagnostics.log(`已迁移 persona preset 配置字段到 0.1.3 schema（text → prefix）：${personaMigration.files.length} 个文件`)
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)

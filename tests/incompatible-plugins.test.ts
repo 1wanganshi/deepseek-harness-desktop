@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import YAML from 'yaml'
-import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile } from '../src/main/incompatible-plugins.js'
+import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile, migratePersonaPresetSchema } from '../src/main/incompatible-plugins.js'
 
 describe('incompatible community plugins', () => {
   it('disables the aggregate doctor supervisor so it cannot install a background Windows task', async () => {
@@ -180,6 +180,72 @@ describe('incompatible community plugins', () => {
     expect(backups).toHaveLength(1)
     await expect(readFile(join(profilePath, backups[0]), 'utf8')).resolves.toBe(original)
     await expect(access(join(profilePath, `${backups[0]}`))).resolves.toBeUndefined()
+  })
+})
+
+describe('persona preset schema migration', () => {
+  it('migrates legacy text: to prefix: in DSH_HOME agent presets', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'dsh-persona-migration-'))
+    const profilePath = await createWebAllProfile('0.1.3-alpha.2')
+    const presetsDir = join(dshHome, '.agent-presets', 'test-preset')
+    await mkdir(presetsDir, { recursive: true })
+    const presetFile = join(presetsDir, 'agent.cordis.yml')
+    await writeFile(presetFile, `- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are a helpful assistant.`)
+
+    const result = await migratePersonaPresetSchema({ dshHome, profilePath })
+
+    expect(result.changed).toBe(true)
+    expect(result.files).toHaveLength(1)
+    const content = await readFile(presetFile, 'utf8')
+    expect(content).toContain('prefix: You are a helpful assistant.')
+    expect(content).not.toContain('text: You are a helpful assistant.')
+  })
+
+  it('does not modify presets that already have prefix:', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'dsh-persona-noop-'))
+    const profilePath = await createWebAllProfile('0.1.3-alpha.2')
+    const presetsDir = join(dshHome, '.agent-presets', 'test-preset')
+    await mkdir(presetsDir, { recursive: true })
+    const presetFile = join(presetsDir, 'agent.cordis.yml')
+    await writeFile(presetFile, `- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: You are a helpful assistant.`)
+
+    const result = await migratePersonaPresetSchema({ dshHome, profilePath })
+
+    expect(result.changed).toBe(false)
+    expect(result.files).toHaveLength(0)
+  })
+
+  it('migrates preset inside profile plugin packages', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'dsh-persona-package-'))
+    const root = await mkdtemp(join(tmpdir(), 'dsh-plugin-migration-'))
+    const profilePath = join(root, 'profiles', 'web')
+    await mkdir(profilePath, { recursive: true })
+    await writeFile(join(profilePath, 'package.json'), JSON.stringify({
+      dependencies: { '@linxin666/dsh-web-all': '^0.3.10' },
+      dsh: { profile: { bundles: ['@linxin666/dsh-web-all'] } },
+    }))
+    await writeFile(join(profilePath, 'cordis.patch.yml'), '[]\n')
+    
+    const pkgPresetsDir = join(profilePath, 'node_modules', '@linxin666', 'dsh-liangshen', 'presets', 'liangshen')
+    await mkdir(pkgPresetsDir, { recursive: true })
+    const presetFile = join(pkgPresetsDir, 'agent.cordis.yml')
+    await writeFile(presetFile, `- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: Custom persona text.`)
+
+    const result = await migratePersonaPresetSchema({ dshHome, profilePath })
+
+    expect(result.changed).toBe(true)
+    expect(result.files).toHaveLength(1)
+    const content = await readFile(presetFile, 'utf8')
+    expect(content).toContain('prefix: Custom persona text.')
   })
 })
 

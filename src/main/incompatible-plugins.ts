@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import YAML from 'yaml'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -23,6 +23,64 @@ export interface TaskBoardMitigationResult {
 export interface ProfilePatchNormalizationResult {
   changed: boolean
   path: string
+}
+
+export interface PersonaPresetMigrationResult {
+  changed: boolean
+  files: string[]
+}
+
+/**
+ * The 0.1.3-alpha persona plugin replaced the single `text` config field with
+ * a required `prefix` field plus optional `suffix`. Presets authored against
+ * the older schema fail validation at mount and block session creation. The
+ * desktop re-syncs preset files from profile plugin packages on every boot,
+ * so both the DSH_HOME copies and the package sources must be migrated.
+ */
+export async function migratePersonaPresetSchema(options: {
+  dshHome: string
+  profilePath: string
+}): Promise<PersonaPresetMigrationResult> {
+  const candidates: string[] = []
+  const homePresets = join(options.dshHome, '.agent-presets')
+  for (const entry of await readDirNames(homePresets)) {
+    candidates.push(join(homePresets, entry, 'agent.cordis.yml'))
+  }
+  const scopeRoot = join(options.profilePath, 'node_modules')
+  for (const scope of await readDirNames(scopeRoot)) {
+    if (!scope.startsWith('@')) continue
+    for (const pkg of await readDirNames(join(scopeRoot, scope))) {
+      const presetsRoot = join(scopeRoot, scope, pkg, 'presets')
+      for (const preset of await readDirNames(presetsRoot)) {
+        candidates.push(join(presetsRoot, preset, 'agent.cordis.yml'))
+      }
+    }
+  }
+  const migrated: string[] = []
+  for (const file of candidates) {
+    let content: string
+    try {
+      content = await readFile(file, 'utf8')
+    } catch {
+      continue
+    }
+    if (!content.includes('@deepseek-ai/dsh-persona')) continue
+    if (/^[ \t]*prefix:/m.test(content)) continue
+    if (!/^[ \t]*text:/m.test(content)) continue
+    const next = content.replace(/^([ \t]*)text:/m, '$1prefix:')
+    await writeFileAtomic(file, next, { mode: 0o644 })
+    migrated.push(file)
+  }
+  return { changed: migrated.length > 0, files: migrated }
+}
+
+async function readDirNames(path: string): Promise<string[]> {
+  try {
+    const entries = await readdir(path, { withFileTypes: true })
+    return entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
+  } catch {
+    return []
+  }
 }
 
 /**
