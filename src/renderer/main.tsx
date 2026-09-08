@@ -20,7 +20,7 @@ const fallbackState: RuntimeState = {
 }
 
 const previewDiagnostics: RuntimeDiagnostics = {
-  state: { ...fallbackState, status: 'running', version: '0.1.2-alpha.5', port: 3080, url: 'http://127.0.0.1:3080' },
+  state: { ...fallbackState, status: 'running', version: '0.1.2-rc.1', port: 3080, url: 'http://127.0.0.1:3080' },
   desktopVersion: '0.2.25',
   runtimeRoot: 'Preview mode — Electron runtime path appears here in the desktop app',
   dshHome: 'Preview mode — isolated DSH_HOME appears here in the desktop app',
