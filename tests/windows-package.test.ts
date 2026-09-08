@@ -30,11 +30,13 @@ describe('Windows desktop distribution metadata', () => {
     expect(manifest.packageManager).toBe('pnpm@11.24.0')
     expect(manifest.dependencies.pnpm).toBe('11.24.0')
     expect(manifest.dependencies.npm).toBe('11.16.0')
+    // All @deepseek-ai/dsh-* dependencies must be pinned to exact published versions
+    const pinnedVersions = ['0.1.3-alpha.2', '0.1.1-rc.2', '0.1.2-alpha.3']
     expect(Object.entries(manifest.dependencies)
       .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
-      .every(([, version]) => version === '0.1.2-rc.1')).toBe(true)
+      .every(([, version]) => pinnedVersions.includes(version))).toBe(true)
     const rendererSource = await readFile(join(projectRoot, 'src', 'renderer', 'main.tsx'), 'utf8')
-    expect(rendererSource).toContain("version: '0.1.2-rc.1'")
+    expect(rendererSource).toContain("version: '0.1.3-alpha.2'")
     expect(rendererSource).toContain("desktopVersion: '0.2.25'")
     const workspaceConfig = await readFile(join(projectRoot, 'pnpm-workspace.yaml'), 'utf8')
     expect(workspaceConfig).toContain('use-sync-external-store: 1.6.0')

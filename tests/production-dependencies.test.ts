@@ -49,8 +49,8 @@ describe('production DSH dependencies', () => {
       dependencies: Record<string, string>
     }
 
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-query']).toBe('0.1.2-rc.1')
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-query-sqlite']).toBe('0.1.2-rc.1')
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-persistence']).toBe('0.1.2-rc.1')
+    expect(manifest.dependencies['@deepseek-ai/dsh-session-query']).toBe('0.1.3-alpha.2')
+    expect(manifest.dependencies['@deepseek-ai/dsh-session-query-sqlite']).toBe('0.1.3-alpha.2')
+    expect(manifest.dependencies['@deepseek-ai/dsh-session-persistence']).toBe('0.1.3-alpha.2')
   })
 })

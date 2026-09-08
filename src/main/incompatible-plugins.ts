@@ -85,15 +85,14 @@ export async function mitigateIncompatibleTaskBoard(options: {
 function isOlderThanTaskBoardCompatibleRuntime(version: string): boolean {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/)
   if (match === null) return true
+  // Any prerelease (has -suffix) is below the stable 0.1.2 contract
+  if (match[4] !== undefined) return true
   const major = Number(match[1])
   const minor = Number(match[2])
   const patch = Number(match[3])
   if (major !== 0) return major < 0
   if (minor !== 1) return minor < 1
-  if (patch !== 2) return patch < 2
-  // The aggregate task-board plugin calls session/list, which is only present
-  // in the 0.1.2 stable API. Every prerelease remains below that contract.
-  return match[4] !== undefined
+  return patch < 2
 }
 
 function readBundles(manifest: Record<string, unknown>): string[] {
