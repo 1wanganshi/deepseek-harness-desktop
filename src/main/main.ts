@@ -1,10 +1,9 @@
 import { app, BrowserWindow, dialog, Menu, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { bundledNpmDepsPath, bundledNpmScript, bundledPnpmScript, runCommand } from './command.js'
+import { bundledPnpmScript, runCommand } from './command.js'
 import { DiagnosticsStore } from './diagnostics.js'
 import { migrateLegacyDsh, type LegacyMigrationStatus } from './migration.js'
 import { ConfigurationDurabilityGuard } from './configuration-durability.js'
@@ -13,7 +12,7 @@ import { SessionDurabilityGuard, recoverMissingSessionIndexes, repairWorkspaceLi
 import { readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
 import { hasMissingProfileDependencies, prepareOfficialWebProfile } from './profile-preparation.js'
-import { ensureClientStoreCompatibility, ensureVisionRouterCompatibility, synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
+import { ensureVisionRouterCompatibility, synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
 import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile, migratePersonaPresetSchema } from './incompatible-plugins.js'
 import { RuntimeController } from './runtime-controller.js'
 import { createRuntimePaths, ensureRuntimeDirectories, resolveBundledRuntime, type ResolvedRuntime } from './runtime-paths.js'
@@ -34,7 +33,12 @@ import { createRepairChecks, updateRepairCheck } from '../shared/repair-progress
 
 const nodeExecutable = process.platform === 'win32'
   ? join(process.resourcesPath, 'node', 'node.exe')
-  : process.execPath
+  : process.platform === 'darwin'
+    // Packaged macOS apps ship a POSIX node binary beside the other resources;
+    // process.execPath is the app's own Electron executable and must never be
+    // used to launch the Harness runtime.
+    ? join(process.resourcesPath, 'node', 'node')
+    : process.execPath
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 let mainWindow: BrowserWindow | null = null
@@ -151,29 +155,6 @@ async function createServices(): Promise<void> {
     [pnpmScript, ...args],
     cwd,
     { ...process.env, DSH_HOME: paths.dshHome },
-    { timeoutMs: 600_000 },
-  )
-  const packagedNpmScript = bundledNpmScript(appRoot, process.resourcesPath)
-  const npmScript = existsSync(packagedNpmScript) ? packagedNpmScript : bundledNpmScript(appRoot)
-  const packagedNpmDeps = bundledNpmDepsPath(process.resourcesPath)
-  const npmNodePath = existsSync(packagedNpmDeps)
-    ? packagedNpmDeps
-    : process.env.NODE_PATH
-  const npmLoader = join(process.resourcesPath, 'npm-loader.cjs')
-  const npmOptions = existsSync(npmLoader)
-    ? [process.env.NODE_OPTIONS, `--require=${npmLoader}`].filter((value): value is string => Boolean(value)).join(' ')
-    : process.env.NODE_OPTIONS
-  const runNpm = (cwd: string, args: string[]) => runCommand(
-    resolveNodeExecutable(),
-    [npmScript, ...args],
-    cwd,
-    {
-      ...process.env,
-      DSH_HOME: paths.dshHome,
-      ...(npmNodePath === undefined ? {} : { NODE_PATH: npmNodePath }),
-      ...(npmOptions === undefined ? {} : { NODE_OPTIONS: npmOptions }),
-      DSH_NPM_DEPS: npmNodePath ?? '',
-    },
     { timeoutMs: 600_000 },
   )
   repairBundledAppDependencies = async () => {
@@ -1050,6 +1031,15 @@ if (!hasSingleInstanceLock) {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('activate', () => {
+  if (process.platform !== 'darwin') return
+  if (mainWindow !== null && !mainWindow.isDestroyed()) {
+    showMainWindow()
+    return
+  }
+  void createWindow()
 })
 
 app.on('before-quit', event => {

@@ -14,9 +14,10 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "build": "vite build && tsc -p tsconfig.electron.json",
     "prepare:runtime": "tsx scripts/prepare-runtime.ts",
-    "post:pack": "node scripts/patch-bundled-runtime.mjs && node -e \"require('fs').copyFileSync('scripts/install.bat','release/win-unpacked/安装.bat')\"",
+    "post:pack": "node scripts/post-pack.mjs",
     "pack": "npm run prepare:runtime && npm run build && electron-builder --win nsis && npm run post:pack",
-    "pack:dir": "npm run prepare:runtime && npm run build && electron-builder --win dir && npm run post:pack"
+    "pack:dir": "npm run prepare:runtime && npm run build && electron-builder --win dir && npm run post:pack",
+    "pack:mac": "npm run build && electron-builder --mac dir && npm run post:pack"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.2",
@@ -134,6 +135,16 @@
         "nsis"
       ],
       "artifactName": "${productName}-${version}-Setup.${ext}"
+    },
+    "mac": {
+      "icon": "resources/dhs-logo-cropped.png",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dir"
+      ],
+      "identity": null,
+      "darkModeSupport": true,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

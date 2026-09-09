@@ -23,7 +23,6 @@ export interface LegacyMigrationOptions {
 
 const markerName = '.desktop-migration.json'
 
-const excludedTopLevelDirectories = new Set(['cache', 'logs', 'profiles'])
 const excludedTopLevelFiles = new Set([
   'fix-dsh-lock.ps1',
   'start-dsh-web.ps1',

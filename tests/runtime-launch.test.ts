@@ -24,6 +24,35 @@ describe('official DSH launch', () => {
     }])
   })
 
+  it('signals the whole POSIX process group by negative PID', () => {
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = []
+    const { terminatePosixRuntimeGroup } = runtimeController as unknown as {
+      terminatePosixRuntimeGroup: (pid: number, signal?: NodeJS.Signals, killImpl?: unknown) => void
+    }
+
+    terminatePosixRuntimeGroup(4321, 'SIGTERM', ((pid: number, signal: NodeJS.Signals) => {
+      calls.push({ pid, signal })
+    }) as never)
+    terminatePosixRuntimeGroup(4321, 'SIGKILL', ((pid: number, signal: NodeJS.Signals) => {
+      calls.push({ pid, signal })
+    }) as never)
+
+    expect(calls).toEqual([
+      { pid: -4321, signal: 'SIGTERM' },
+      { pid: -4321, signal: 'SIGKILL' },
+    ])
+  })
+
+  it('ignores an already-gone POSIX process group', () => {
+    const { terminatePosixRuntimeGroup } = runtimeController as unknown as {
+      terminatePosixRuntimeGroup: (pid: number, signal?: NodeJS.Signals, killImpl?: unknown) => void
+    }
+
+    expect(() => terminatePosixRuntimeGroup(4321, 'SIGTERM', (() => {
+      throw new Error('ESRCH')
+    }) as never)).not.toThrow()
+  })
+
   it('observes a graceful child exit before forced termination is considered', async () => {
     const child = Object.assign(new EventEmitter(), { exitCode: null })
     const waiting = waitForChildExit(child as never, 100)

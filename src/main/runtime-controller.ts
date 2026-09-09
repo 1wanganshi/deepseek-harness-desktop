@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { access, readFile } from 'node:fs/promises'
+import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { findAvailablePort } from './ports.js'
 import { clearProfileFallbackLinks } from './profile-fallback.js'
@@ -59,6 +59,23 @@ export async function terminateWindowsRuntimeTree(
   await new Promise<void>(resolve => {
     execFileImpl('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, () => resolve())
   })
+}
+
+/**
+ * POSIX counterpart of the Windows tree kill. The child is spawned detached,
+ * so the negative PID addresses its whole process group and plugin
+ * supervisors cannot outlive the Harness parent.
+ */
+export function terminatePosixRuntimeGroup(
+  pid: number,
+  signal: NodeJS.Signals = 'SIGTERM',
+  killImpl: (pid: number, signal: NodeJS.Signals) => void = process.kill.bind(process),
+): void {
+  try {
+    killImpl(-pid, signal)
+  } catch {
+    // The group may already be gone; there is nothing left to terminate.
+  }
 }
 
 export interface RuntimeControllerOptions {
@@ -221,6 +238,9 @@ export class RuntimeController {
         DSH_DESKTOP_PORT: String(port),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // POSIX: a detached child becomes its own process-group leader so the
+      // whole tree (including plugin supervisors) can be signalled via -pid.
+      detached: process.platform !== 'win32',
       windowsHide: true,
     })
     this.child = child
@@ -389,6 +409,14 @@ export class RuntimeController {
       // Taskkill must run before the parent exits. A graceful exit can detach
       // DHS plugin supervisors, leaving the embedded node.exe running.
       await terminateWindowsRuntimeTree(child.pid)
+      await this.sleep(100)
+      return
+    }
+    if (process.platform !== 'win32' && child.pid !== undefined) {
+      terminatePosixRuntimeGroup(child.pid, 'SIGTERM')
+      const exited = await waitForChildExit(child, CHILD_SHUTDOWN_GRACE_MS)
+      if (!exited) terminatePosixRuntimeGroup(child.pid, 'SIGKILL')
+      if (!exited) child.kill()
       await this.sleep(100)
       return
     }

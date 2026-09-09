@@ -45,6 +45,14 @@ function terminateProcessTree(child: ChildProcess): void {
   child.kill()
   if (process.platform === 'win32' && child.pid !== undefined) {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+    return
+  }
+  if (process.platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+    } catch {
+      // The process group is already gone; nothing to clean up.
+    }
   }
 }
 
@@ -71,6 +79,9 @@ export function runCommand(
       cwd,
       env: normalizeNodeOptions(env),
       stdio: ['ignore', 'pipe', 'pipe'],
+      // POSIX: make the child a process-group leader so a timeout can kill
+      // the whole tree, mirroring taskkill /T on Windows.
+      detached: process.platform !== 'win32',
       windowsHide: true,
       shell: false,
     })

@@ -1,0 +1,92 @@
+name: macOS desktop build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            label: apple-silicon
+          - arch: x64
+            label: intel
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Prepare bundled runtime for target arch
+        run: pnpm run prepare:runtime -- --platform darwin --arch ${{ matrix.arch }}
+
+      - name: Build renderer and main bundles
+        run: pnpm run build
+
+      - name: Package app bundle
+        run: pnpm exec electron-builder --mac dir --arch ${{ matrix.arch }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Patch bundled runtime and add installer script
+        run: pnpm run post:pack
+
+      - name: Ad-hoc sign app bundle
+        run: |
+          APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
+          echo "Signing: $APP_PATH"
+          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+      - name: Create distributable zip
+        run: |
+          APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
+          APP_DIR=$(dirname "$APP_PATH")
+          STAGING="release/dist-mac-${{ matrix.arch }}"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "$APP_PATH" "$STAGING/"
+          [ -f "$APP_DIR/安装.command" ] && cp "$APP_DIR/安装.command" "$STAGING/" || true
+          cd "$STAGING"
+          ZIP_NAME="DeepSeek-Harness-Desktop-${{ github.ref_name }}-mac-${{ matrix.label }}.zip"
+          ditto -ck --sequesterRsrc --keepParent . "../$ZIP_NAME"
+          cd ..
+          echo "ARTIFACT_ZIP=$ZIP_NAME" >> "$GITHUB_ENV"
+          shasum -a 256 "$ZIP_NAME"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-desktop-mac-${{ matrix.label }}
+          path: release/*.zip
+          if-no-files-found: error

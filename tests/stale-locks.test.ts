@@ -53,4 +53,13 @@ describe('stale process locks', () => {
       dshHome,
     )).toBe(true)
   })
+
+  it('matches macOS-style bundle paths after slash normalization', () => {
+    const dshHome = '/Users/demo/Library/Application Support/deepseek-harness-desktop/dsh-home'
+    expect(processCommandLineBelongsToDsh(
+      '/Applications/DeepSeek Harness Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js web --no-open',
+      dshHome,
+    )).toBe(true)
+    expect(processCommandLineBelongsToDsh('/usr/sbin/cfprefsd agent mode', dshHome)).toBe(false)
+  })
 })

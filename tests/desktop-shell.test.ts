@@ -7,8 +7,9 @@ describe('desktop shell window lifecycle', () => {
     expect(shouldHideOnClose({ platform: 'win32', quitting: true })).toBe(false)
   })
 
-  it('does not apply the tray close behavior to macOS', () => {
-    expect(shouldHideOnClose({ platform: 'darwin', quitting: false })).toBe(false)
+  it('keeps the macOS app alive when the user closes its last window', () => {
+    expect(shouldHideOnClose({ platform: 'darwin', quitting: false })).toBe(true)
+    expect(shouldHideOnClose({ platform: 'darwin', quitting: true })).toBe(false)
   })
 
   it('keeps the window on the taskbar when minimized', () => {

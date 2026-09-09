@@ -59,8 +59,26 @@ export function processCommandLineBelongsToDsh(commandLine: string, dshHome: str
   ].some(marker => normalized.includes(marker))
 }
 
+function readPosixProcessCommandLine(pid: number): Promise<string | null> {
+  return new Promise(resolve => {
+    execFile('ps', ['-p', String(pid), '-o', 'command='], (error, stdout) => {
+      if (error !== null) {
+        resolve(null)
+        return
+      }
+      const command = stdout.trim()
+      resolve(command === '' ? null : command)
+    })
+  })
+}
+
+function readProcessCommandLine(pid: number): Promise<string | null> {
+  if (process.platform === 'win32') return readWindowsProcessCommandLine(pid)
+  if (process.platform === 'darwin' || process.platform === 'linux') return readPosixProcessCommandLine(pid)
+  return Promise.resolve(null)
+}
+
 function readWindowsProcessCommandLine(pid: number): Promise<string | null> {
-  if (process.platform !== 'win32') return Promise.resolve(null)
   return new Promise(resolve => {
     execFile(
       'powershell.exe',
@@ -79,7 +97,7 @@ function readWindowsProcessCommandLine(pid: number): Promise<string | null> {
 /** Check that a live PID is the DHS writer expected by this profile lock. */
 export async function isWindowsDshProcessAlive(pid: number, dshHome: string): Promise<boolean> {
   if (!await isWindowsProcessAlive(pid)) return false
-  const commandLine = await readWindowsProcessCommandLine(pid)
+  const commandLine = await readProcessCommandLine(pid)
   // If process inspection is unavailable, preserve the lock. Deleting an
   // active writer's lock is more dangerous than waiting for operator repair.
   return commandLine === null || processCommandLineBelongsToDsh(commandLine, dshHome)

@@ -4,11 +4,36 @@ import { fileURLToPath } from 'node:url'
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url))
 const projectModules = join(projectRoot, 'node_modules')
-const bundledScope = join(projectRoot, 'release', 'win-unpacked', 'resources', 'app', 'node_modules', '@deepseek-ai')
 const pnpmStore = join(projectRoot, 'node_modules', '.pnpm')
 
-if (!existsSync(bundledScope)) {
-  console.error('[patch-bundled-runtime] bundled node_modules not found, run pack first:', bundledScope)
+function detectBundledScope() {
+  const candidates = [
+    join(projectRoot, 'release', 'win-unpacked', 'resources', 'app'),
+  ]
+  // macOS electron-builder output: release/mac-arm64/<AppName>.app/Contents/Resources/app (and similar)
+  try {
+    for (const entry of readdirSync(join(projectRoot, 'release'))) {
+      if (!entry.startsWith('mac')) continue
+      const macDir = join(projectRoot, 'release', entry)
+      if (!statSync(macDir).isDirectory()) continue
+      for (const appEntry of readdirSync(macDir)) {
+        if (!appEntry.endsWith('.app')) continue
+        candidates.push(join(macDir, appEntry, 'Contents', 'Resources', 'app'))
+      }
+    }
+  } catch {
+    // No release directory yet; fall through to the default error below.
+  }
+  for (const candidate of candidates) {
+    const scope = join(candidate, 'node_modules', '@deepseek-ai')
+    if (existsSync(scope)) return scope
+  }
+  return null
+}
+
+const bundledScope = detectBundledScope()
+if (bundledScope === null) {
+  console.error('[patch-bundled-runtime] bundled node_modules not found, run pack first')
   process.exit(1)
 }
 
