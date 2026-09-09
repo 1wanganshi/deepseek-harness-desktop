@@ -61,6 +61,11 @@ jobs:
       - name: Patch bundled runtime and add installer script
         run: pnpm run post:pack
 
+      - name: Materialize escaping symlinks in bundle
+        run: |
+          APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
+          node scripts/materialize-symlinks.mjs "$APP_PATH"
+
       - name: Ad-hoc sign app bundle
         run: |
           APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
