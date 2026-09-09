@@ -77,13 +77,14 @@ jobs:
         run: |
           APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
           APP_DIR=$(dirname "$APP_PATH")
+          VERSION=$(node -p "require('./package.json').version")
           STAGING="release/dist-mac-${{ matrix.arch }}"
           rm -rf "$STAGING"
           mkdir -p "$STAGING"
           cp -R "$APP_PATH" "$STAGING/"
           [ -f "$APP_DIR/安装.command" ] && cp "$APP_DIR/安装.command" "$STAGING/" || true
           cd "$STAGING"
-          ZIP_NAME="DeepSeek-Harness-Desktop-${{ github.ref_name }}-mac-${{ matrix.label }}.zip"
+          ZIP_NAME="DeepSeek-Harness-Desktop-${VERSION}-mac-${{ matrix.label }}.zip"
           ditto -ck --sequesterRsrc --keepParent . "../$ZIP_NAME"
           cd ..
           echo "ARTIFACT_ZIP=$ZIP_NAME" >> "$GITHUB_ENV"
