@@ -127,6 +127,13 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "resources/macos-bin",
+        "to": "macos-bin",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

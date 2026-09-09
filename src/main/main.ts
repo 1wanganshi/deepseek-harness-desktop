@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, Menu, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundledPnpmScript, runCommand } from './command.js'
 import { DiagnosticsStore } from './diagnostics.js'
@@ -23,6 +23,7 @@ import { buildRestartHelperArgs, restartDesktop, shutdownDesktop, shouldProceedW
 import { repairBundledDependencies } from './bundled-dependencies.js'
 import { repairOpenAiProviderCompatibility } from './provider-compatibility.js'
 import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
+import { resolveMacOsBinDir, startPickerBridge, type PickerBridge } from './picker-bridge.js'
 import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
 import { repairWindowOptions } from './repair-window.js'
 import { buildStatusPanelMenu } from './status-panel-menu.js'
@@ -64,6 +65,8 @@ let authenticatedHarnessAdvertisedUrl: string | null = null
 let authenticatedHarnessTargetUrl: string | null = null
 let harnessMountRecoveryAttempts = 0
 let harnessMountRecoveryInFlight = false
+let pickerBridge: PickerBridge | null = null
+let pickerChildEnv: NodeJS.ProcessEnv | undefined
 let migration: LegacyMigrationStatus = {
   status: 'not-found',
   legacyHome: '',
@@ -119,6 +122,18 @@ async function createServices(): Promise<void> {
   // diagnostics/history only and can never replace the bundled runtime.
   activeRuntime = resolveBundledRuntime(paths, initialVersion)
 
+  if (process.platform === 'darwin') {
+    const binDir = resolveMacOsBinDir(appRoot)
+    if (binDir !== null) {
+      pickerBridge = await startPickerBridge()
+      pickerChildEnv = {
+        PATH: [binDir, process.env.PATH].filter((value): value is string => Boolean(value)).join(delimiter),
+        DSH_DESKTOP_PICKER_PORT: String(pickerBridge.port),
+        DSH_DESKTOP_PICKER_TOKEN: pickerBridge.token,
+      }
+    }
+  }
+
   const log = async (line: string) => diagnostics?.log(line)
   runtime = new RuntimeController({
     resolveRuntime: async () => {
@@ -127,6 +142,7 @@ async function createServices(): Promise<void> {
     },
     dshHome: paths.dshHome,
     nodeExecutable: resolveNodeExecutable(),
+    childEnv: pickerChildEnv,
     log: line => { void log(line) },
     onState: state => {
       sendDesktopEvent('desktop:runtime-state', state)
@@ -177,6 +193,10 @@ async function createServices(): Promise<void> {
     getMigration: () => migration,
     getProjectSessionMerge: () => projectSessionMerge,
   })
+
+  if (pickerBridge !== null) {
+    void diagnostics.log(`macOS 目录选择桥已就绪：127.0.0.1:${pickerBridge.port}（osascript 垫片接管 choose folder，规避 -1713）`)
+  }
 
   if (await removeLegacyDoctorSupervisor()) {
     void diagnostics.log('已移除旧版社区 Doctor 后台监督任务；桌面端将自行管理运行时重启和维修')

@@ -82,6 +82,8 @@ export interface RuntimeControllerOptions {
   resolveRuntime: () => Promise<ResolvedRuntime>
   dshHome: string
   nodeExecutable?: string
+  /** Extra environment merged last into the Harness child (platform shims). */
+  childEnv?: NodeJS.ProcessEnv
   log?: (line: string) => void
   onState?: (state: RuntimeState) => void
   fetchImpl?: typeof fetch
@@ -236,6 +238,7 @@ export class RuntimeController {
         DSH_HOME: this.options.dshHome,
         DSH_DESKTOP_SUPERVISED: '1',
         DSH_DESKTOP_PORT: String(port),
+        ...(this.options.childEnv ?? {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // POSIX: a detached child becomes its own process-group leader so the

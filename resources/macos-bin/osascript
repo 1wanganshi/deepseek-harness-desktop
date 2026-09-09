@@ -1,0 +1,38 @@
+#!/bin/bash
+# DeepSeek Harness Desktop macOS picker shim.
+#
+# The official Harness runtime shows its workspace picker by running
+#   osascript -e 'set selectedFolder to choose folder with prompt "..."' ...
+# macOS denies user interaction (-1713) for the supervised server process, so
+# that dialog can never appear. This shim intercepts exactly that call and
+# routes it through the desktop shell's native directory dialog over a
+# loopback HTTP bridge; every other osascript invocation passes through to
+# the real /usr/bin/osascript unchanged.
+
+set -u
+
+joined="$*"
+port="${DSH_DESKTOP_PICKER_PORT:-}"
+token="${DSH_DESKTOP_PICKER_TOKEN:-}"
+
+if [[ "$joined" == *"choose folder"* && -n "$port" && -n "$token" ]]; then
+  prompt="Select Workspace Directory"
+  if [[ "$joined" =~ with\ prompt\ \"([^\"]*)\" ]]; then
+    prompt="${BASH_REMATCH[1]}"
+  fi
+  escaped=$(printf '%s' "$prompt" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  response=$(curl -s -m 600 -w $'\n%{http_code}' -X POST \
+    "http://127.0.0.1:${port}/${token}/pick-directory" \
+    -H 'Content-Type: application/json' \
+    -d "{\"prompt\":\"${escaped}\"}" 2>/dev/null)
+  http_code=$(printf '%s' "$response" | tail -n 1)
+  payload=$(printf '%s' "$response" | sed '$d')
+  if [ "$http_code" = "200" ] && [ -n "$payload" ]; then
+    printf '%s\n' "$payload"
+    exit 0
+  fi
+  echo "User canceled (-128)" >&2
+  exit 1
+fi
+
+exec /usr/bin/osascript "$@"
