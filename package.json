@@ -15,9 +15,9 @@
     "build": "vite build && tsc -p tsconfig.electron.json",
     "prepare:runtime": "tsx scripts/prepare-runtime.ts",
     "post:pack": "node scripts/post-pack.mjs",
-    "pack": "npm run prepare:runtime && npm run build && electron-builder --win nsis && npm run post:pack",
-    "pack:dir": "npm run prepare:runtime && npm run build && electron-builder --win dir && npm run post:pack",
-    "pack:mac": "npm run build && electron-builder --mac dir && npm run post:pack"
+    "pack": "npm run prepare:runtime && npm run build && electron-builder --win nsis -p never && npm run post:pack",
+    "pack:dir": "npm run prepare:runtime && npm run build && electron-builder --win dir -p never && npm run post:pack",
+    "pack:mac": "npm run build && electron-builder --mac dir -p never && npm run post:pack"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.2",

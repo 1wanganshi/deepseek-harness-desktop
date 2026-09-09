@@ -54,7 +54,7 @@ jobs:
         run: pnpm run build
 
       - name: Package app bundle
-        run: pnpm exec electron-builder --mac dir --arch ${{ matrix.arch }}
+        run: pnpm exec electron-builder --mac dir --${{ matrix.arch }} -p never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
