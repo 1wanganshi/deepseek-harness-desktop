@@ -12,30 +12,26 @@ describe('production DSH dependencies', () => {
     }
 
     const required = [
+      '@deepseek-ai/cordis',
       '@deepseek-ai/cordis-plugin-group',
-      '@deepseek-ai/dsh-api-session-controller',
-      '@deepseek-ai/dsh-session-query',
-      '@deepseek-ai/dsh-session-query-sqlite',
-      '@deepseek-ai/dsh-attachment',
-      '@deepseek-ai/dsh-code-runtime',
-      '@deepseek-ai/dsh-compaction',
-      '@deepseek-ai/dsh-anonymous-user-id',
+      '@deepseek-ai/dsh',
+      '@deepseek-ai/dsh-app-boot',
       '@deepseek-ai/dsh-atomic-write',
-      '@deepseek-ai/dsh-fs',
-      '@deepseek-ai/dsh-invariants',
-      '@deepseek-ai/dsh-llm-deepseek',
-      '@deepseek-ai/dsh-output-retention',
-      '@deepseek-ai/dsh-sandbox',
-      '@deepseek-ai/dsh-scope',
-      '@deepseek-ai/dsh-session-persistence',
-      '@deepseek-ai/dsh-session-telemetry',
-      '@deepseek-ai/dsh-session-title-llm',
-      '@deepseek-ai/dsh-shell',
-      '@deepseek-ai/dsh-spill',
-      '@deepseek-ai/dsh-subagent-in-process-driver',
-      '@deepseek-ai/dsh-timeout',
-      '@deepseek-ai/dsh-util-time',
-      '@deepseek-ai/dsh-workflow',
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-compaction-basic',
+      '@deepseek-ai/dsh-fs-local',
+      '@deepseek-ai/dsh-headless',
+      '@deepseek-ai/dsh-home-paths',
+      '@deepseek-ai/dsh-jobs-local',
+      '@deepseek-ai/dsh-launch-environment',
+      '@deepseek-ai/dsh-session-projection',
+      '@deepseek-ai/dsh-session-reference',
+      '@deepseek-ai/dsh-terminal',
+      '@deepseek-ai/dsh-terminal-bash',
+      '@deepseek-ai/dsh-tool-bash',
+      '@deepseek-ai/dsh-tool-fs',
+      '@deepseek-ai/dsh-tool-subagent',
+      '@deepseek-ai/dsh-web-app',
       '@deepseek-ai/dsh-workflow-worker-thread',
     ]
 
@@ -44,13 +40,14 @@ describe('production DSH dependencies', () => {
     }
   })
 
-  it('pins the session-query contract used by the history controller', async () => {
+  it('pins the 0.1.5 runtime line used by the bundled Harness', async () => {
     const manifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
     }
 
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-query']).toBe('0.1.3-alpha.2')
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-query-sqlite']).toBe('0.1.3-alpha.2')
-    expect(manifest.dependencies['@deepseek-ai/dsh-session-persistence']).toBe('0.1.3-alpha.2')
+    const runtime = Object.entries(manifest.dependencies)
+      .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+    expect(runtime.length).toBeGreaterThan(50)
+    expect(runtime.every(([, version]) => version === '0.1.5-rc.1')).toBe(true)
   })
 })
