@@ -606,16 +606,27 @@ async function requestSafeDesktopExit(): Promise<void> {
     if (!result.stopped) {
       const detail = describeSessionBlockers(result.report)
       void diagnostics.log(`已取消桌面退出：${detail.replace(/\n/g, '；')}`)
+      // The durability guard is an advisory: it must warn about a risky exit
+      // but never trap the user inside a running app. Offer an explicit
+      // force-quit escape hatch instead of a single acknowledgement button.
       const options: Electron.MessageBoxOptions = {
         type: 'warning',
         title: 'DeepSeek Harness Desktop',
         message: '为保护会话记录，桌面端未退出。',
-        detail,
-        buttons: ['知道了'],
+        detail: `${detail}\n\n可以先用「仍然退出」强制关闭；未完成的会话记录可能无法在下次启动时恢复。`,
+        buttons: ['知道了', '仍然退出'],
+        defaultId: 0,
+        cancelId: 0,
         noLink: true,
       }
-      if (mainWindow !== null && !mainWindow.isDestroyed()) void dialog.showMessageBox(mainWindow, options)
-      else void dialog.showMessageBox(options)
+      const choice = mainWindow !== null && !mainWindow.isDestroyed()
+        ? await dialog.showMessageBox(mainWindow, options)
+        : await dialog.showMessageBox(options)
+      if (choice.response === 1) {
+        void diagnostics.log('用户选择仍然退出，已跳过会话持久化护栏')
+        quitApproved = true
+        app.exit(0)
+      }
       return
     }
     quitApproved = true
@@ -627,12 +638,20 @@ async function requestSafeDesktopExit(): Promise<void> {
       type: 'warning',
       title: 'DeepSeek Harness Desktop',
       message: '无法确认会话已完整保存，桌面端未退出。',
-      detail,
-      buttons: ['知道了'],
+      detail: `${detail}\n\n可以先用「仍然退出」强制关闭；未完成的会话记录可能无法在下次启动时恢复。`,
+      buttons: ['知道了', '仍然退出'],
+      defaultId: 0,
+      cancelId: 0,
       noLink: true,
     }
-    if (mainWindow !== null && !mainWindow.isDestroyed()) void dialog.showMessageBox(mainWindow, options)
-    else void dialog.showMessageBox(options)
+    const choice = mainWindow !== null && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options)
+    if (choice.response === 1) {
+      void diagnostics.log('用户选择仍然退出，已跳过会话持久化护栏')
+      quitApproved = true
+      app.exit(0)
+    }
   } finally {
     desktopExitInFlight = false
   }
@@ -1022,7 +1041,13 @@ if (!hasSingleInstanceLock) {
   })
 
   app.whenReady().then(async () => {
-    session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+    // Deny everything by default, but the official Web UI needs clipboard
+    // write access for its copy buttons; a blanket denial silently breaks them.
+    const allowedPermissions = new Set(['clipboard-write', 'clipboard-sanitized-write'])
+    session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+      callback(allowedPermissions.has(permission))
+    })
+    session.defaultSession.setPermissionCheckHandler((_webContents, permission) => allowedPermissions.has(permission))
     await createServices()
     registerIpc()
     await createWindow()

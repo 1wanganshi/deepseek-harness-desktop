@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SessionDurabilityGuard, repairWorkspaceLinks } from '../src/main/session-durability.js'
+import { SessionDurabilityGuard, isTranscriptFileName, repairWorkspaceLinks } from '../src/main/session-durability.js'
 
 const roots: string[] = []
 const project = 'D:\\vibecoding\\DHS1'
@@ -57,6 +57,42 @@ afterEach(async () => {
 })
 
 describe('session durability guard', () => {
+  it('recognizes every transcript file name variant the official runtimes write', () => {
+    expect(isTranscriptFileName('session.jsonl.zstd')).toBe(true)
+    expect(isTranscriptFileName('session.v2.jsonl.zstd')).toBe(true)
+    expect(isTranscriptFileName('session.v3.jsonl.zstd')).toBe(true)
+    expect(isTranscriptFileName('session.v10.jsonl.zstd')).toBe(true)
+    expect(isTranscriptFileName('SESSION.V3.JSONL.ZSTD')).toBe(true)
+    expect(isTranscriptFileName('session.jsonl')).toBe(false)
+    expect(isTranscriptFileName('session-v3.jsonl.zstd')).toBe(false)
+  })
+
+  it('does not block exit for sessions stored in a versioned transcript file', async () => {
+    const { dshHome, backupRoot } = await setup()
+    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    // 0.1.5 writes `session.v3.jsonl.zstd`; those sessions must never be
+    // reported as missing a transcript.
+    const dir = join(dshHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`)
+    await mkdir(dir, { recursive: true })
+    const header = { type: 'session', id, cwd: project, createdAt: Date.now(), seq: 0 }
+    const user = {
+      type: 'user/message',
+      seq: 1,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: '版本化 transcript 会话' }] },
+    }
+    await writeFile(
+      join(dir, 'session.v3.jsonl.zstd'),
+      Buffer.concat([header, user].map(value => zstdCompressSync(Buffer.from(`${JSON.stringify(value)}\n`)))),
+    )
+    await writeIndex(dshHome, id)
+
+    const guard = new SessionDurabilityGuard({ dshHome, backupRoot, settleMs: 0 })
+    await guard.captureBaseline()
+    const report = await guard.verifyForRestart()
+
+    expect(report.blockers.filter(blocker => blocker.sessionId === id)).toEqual([])
+  })
+
   it('normalizes imported workspace links without duplicating the session', async () => {
     const { dshHome, backupRoot } = await setup()
     const id = 'import-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'

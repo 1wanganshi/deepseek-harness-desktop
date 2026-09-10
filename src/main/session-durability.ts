@@ -54,6 +54,16 @@ function sessionIdFromName(name: string): string | null {
   return match?.[1] ?? null
 }
 
+/**
+ * Official runtimes write the session transcript as `session.jsonl.zstd` and
+ * later versions bump an explicit format tag (`session.v2.jsonl.zstd`,
+ * `session.v3.jsonl.zstd`). Every variant is a valid transcript; matching only
+ * the untagged name silently classifies newer sessions as missing.
+ */
+export function isTranscriptFileName(name: string): boolean {
+  return /^session(?:\.v\d+)?\.jsonl\.zstd$/i.test(name)
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path)
@@ -193,10 +203,10 @@ async function scanSessions(dshHome: string): Promise<Map<string, SessionRecord>
       transcriptSignature: null,
     })
   }
-  for (const path of await listFiles(join(dshHome, 'sessions'), name => name === 'session.jsonl.zstd')) {
+  for (const path of await listFiles(join(dshHome, 'sessions'), name => isTranscriptFileName(name))) {
     // Imported sessions use an `import-*` directory while native sessions use
     // `session-*`; both are valid session IDs and must be indexed alike.
-    const match = /[\\/]([^\\/]+)[\\/]session\.jsonl\.zstd$/i.exec(path)
+    const match = /[\\/]([^\\/]+)[\\/]session(?:\.v\d+)?\.jsonl\.zstd$/i.exec(path)
     if (match === null) continue
     const directoryId = match[1]
     const id = directoryId.startsWith('session-') ? directoryId.slice('session-'.length) : directoryId
