@@ -22,6 +22,7 @@ import { startAfterProfilePreparation } from './startup-sequence.js'
 import { buildRestartHelperArgs, restartDesktop, shutdownDesktop, shouldProceedWithDesktopRestart, type DesktopRestartResult } from './desktop-restart.js'
 import { repairBundledDependencies } from './bundled-dependencies.js'
 import { repairOpenAiProviderCompatibility } from './provider-compatibility.js'
+import { repairVisionCapabilities } from './vision-capability.js'
 import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
 import { resolveMacOsBinDir, startPickerBridge, type PickerBridge } from './picker-bridge.js'
 import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
@@ -231,6 +232,18 @@ async function createServices(): Promise<void> {
     }
   } catch (error) {
     void diagnostics.log(`启动预检未能修复模型 Provider 兼容配置，可从维修窗口重试：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  try {
+    const vision = await repairVisionCapabilities(paths.dshHome)
+    if (vision.changed) {
+      const parts: string[] = []
+      if (vision.added.length > 0) parts.push(`启用识图 ${vision.added.join(', ')}`)
+      if (vision.removed.length > 0) parts.push(`移除误标的识图声明 ${vision.removed.join(', ')}`)
+      void diagnostics.log(`启动预检已按实际探测结果校准模型视觉能力：${parts.join('；')}`)
+    }
+  } catch (error) {
+    void diagnostics.log(`启动预检未能校准模型视觉能力：${error instanceof Error ? error.message : String(error)}`)
   }
 
   projectSessionMerge = await mergeLegacyProjectSessions({
@@ -918,6 +931,23 @@ async function runRepairPipeline(): Promise<RepairReport> {
     }
   } catch (error) {
     complete('provider-compatibility', 'failed', message(error), '模型 Provider 兼容配置维修失败')
+  }
+
+  try {
+    await beginCheck('provider-compatibility')
+    if (runtimePaths === null) throw new Error('运行目录尚未初始化')
+    const vision = await repairVisionCapabilities(runtimePaths.dshHome, { force: true })
+    if (vision.changed) {
+      const details: string[] = []
+      if (vision.added.length > 0) details.push(`启用识图：${vision.added.join('、')}`)
+      if (vision.removed.length > 0) details.push(`移除误标：${vision.removed.join('、')}`)
+      complete('provider-compatibility', 'fixed', `已校准模型视觉能力；${details.join('；')}`)
+      void diagnostics.log(`已按实际探测结果校准模型视觉能力：${details.join('；')}`)
+    } else {
+      complete('provider-compatibility', 'ok', '模型视觉能力与探测结果一致', '未发现不一致的识图能力声明')
+    }
+  } catch (error) {
+    complete('provider-compatibility', 'failed', message(error), '模型视觉能力校准失败')
   }
 
   try {
