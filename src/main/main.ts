@@ -175,7 +175,9 @@ async function createServices(): Promise<void> {
   )
   repairBundledAppDependencies = async () => {
     const workerPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
-    const workflowPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-workflow')
+    // 0.1.5 renamed the workflow bundle: the monolithic dsh-workflow package was
+    // split into dsh-tool-workflow plus the worker-thread runtime.
+    const workflowPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-tool-workflow')
     const repaired = await repairBundledDependencies({
       workerPath,
       requiredPackagePaths: [workflowPath],

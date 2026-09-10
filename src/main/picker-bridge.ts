@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
-import { dialog } from 'electron'
+import electron from 'electron'
+
+// The Electron main process is CommonJS: named ESM imports only work when the
+// bundler's static analysis can prove they exist. Resolve the namespace at
+// runtime so this module stays loadable regardless of that interop heuristic.
+const { dialog } = electron
 
 export interface PickerBridge {
   port: number
