@@ -356,11 +356,20 @@ async function prepareWebProfile(options: {
     }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
-    // Never launch Harness against a partially rebuilt profile. Keeping the
-    // rejection lets the startup gate show the real failure and leaves the
-    // existing profile backup available for the repair flow.
-    void diagnostics.log(`插件兼容层或依赖重建失败，已阻止启动：${detail}`)
-    throw error
+    // A failed install is not by itself proof that the profile is unusable:
+    // the registry can be unreachable while a complete dependency tree is
+    // already on disk. Only block startup when dependencies are genuinely
+    // absent, otherwise degrade to a warning and let the runtime try.
+    const stillMissing = await hasMissingProfileDependencies(profilePath).catch(() => [])
+    if (stillMissing.length === 0 && existsSync(profileNodeModules)) {
+      void diagnostics.log(`插件依赖重建未完成（${detail}），但已安装的依赖完整，继续启动`)
+    } else {
+      // Never launch Harness against a partially rebuilt profile. Keeping the
+      // rejection lets the startup gate show the real failure and leaves the
+      // existing profile backup available for the repair flow.
+      void diagnostics.log(`插件兼容层或依赖重建失败，已阻止启动：${detail}`)
+      throw error
+    }
   }
 }
 

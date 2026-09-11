@@ -3,7 +3,7 @@ chcp 65001 >nul
 title DeepSeek Harness Desktop 安装程序
 
 echo ============================================
-echo   DeepSeek Harness Desktop 0.2.25 安装程序
+echo   DeepSeek Harness Desktop 0.3.0 安装程序
 echo ============================================
 echo.
 
@@ -63,7 +63,7 @@ powershell -Command ^
     "$key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\DeepSeekHarnessDesktop';" ^
     "New-Item -Path $key -Force | Out-Null;" ^
     "Set-ItemProperty -Path $key -Name 'DisplayName' -Value 'DeepSeek Harness Desktop';" ^
-    "Set-ItemProperty -Path $key -Name 'DisplayVersion' -Value '0.2.25';" ^
+    "Set-ItemProperty -Path $key -Name 'DisplayVersion' -Value '0.3.0';" ^
     "Set-ItemProperty -Path $key -Name 'Publisher' -Value 'WangAnshi';" ^
     "Set-ItemProperty -Path $key -Name 'UninstallString' -Value ('cmd /c rmdir /s /q \"' + '%DST%' + '\"');" ^
     "Set-ItemProperty -Path $key -Name 'InstallLocation' -Value '%DST%';" ^

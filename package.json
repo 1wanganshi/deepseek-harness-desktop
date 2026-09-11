@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.2.25",
+  "version": "0.3.0",
   "private": true,
   "packageManager": "pnpm@11.24.0",
   "author": "DeepSeek Harness Desktop contributors",
