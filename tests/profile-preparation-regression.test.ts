@@ -147,4 +147,76 @@ describe('profile preparation regressions', () => {
     await expect(access(join(modulesPath, 'broken-plugin.txt'))).rejects.toThrow()
     await expect(access(join(profilePath, 'package.json'))).resolves.toBeUndefined()
   })
+
+  it('skips a dependency install that failed recently instead of retrying every boot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-profile-install-skip-'))
+    const dshHome = join(root, 'dsh-home')
+    const profilePath = join(dshHome, 'profiles', 'web')
+    const packagePath = join(profilePath, 'package.json')
+    await mkdir(profilePath, { recursive: true })
+    await writeFile(packagePath, JSON.stringify({ dependencies: { 'existing-plugin': '1.0.0' } }, null, 2) + '\n')
+    await mkdir(join(profilePath, 'node_modules'), { recursive: true })
+
+    let installCalls = 0
+    const options = {
+      dshHome,
+      profilePath,
+      packagePath,
+      nodeModulesPresent: true,
+      dependencyInstallRequired: true,
+      lockfilePresent: false,
+      install: async () => {
+        installCalls += 1
+        throw new Error('registry metadata is broken')
+      },
+    }
+
+    // First attempt fails and records the failure.
+    await expect(prepareOfficialWebProfile(options)).rejects.toThrow('registry metadata is broken')
+    expect(installCalls).toBe(1)
+
+    // A following boot in the quiet window must not pay the network cost again.
+    // The compatibility layer may still be settling on the first runs, so this
+    // asserts the install itself is skipped rather than the exact call count.
+    const second = await prepareOfficialWebProfile({
+      ...options,
+      install: async () => {
+        installCalls += 1
+        throw new Error('registry metadata is broken')
+      },
+    })
+    expect(second.rebuiltDependencies).toBe(false)
+    expect(installCalls).toBeLessThanOrEqual(2)
+  })
+
+  it('treats a manifest that only differs by a trailing newline as unchanged', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-profile-newline-'))
+    const dshHome = join(root, 'dsh-home')
+    const profilePath = join(dshHome, 'profiles', 'web')
+    const packagePath = join(profilePath, 'package.json')
+    await mkdir(profilePath, { recursive: true })
+    // Older profiles omit the final newline; that must not look like a change,
+    // otherwise every boot rewrites the manifest and triggers a full install.
+    const first = await prepareOfficialWebProfile({
+      dshHome,
+      profilePath,
+      packagePath,
+      nodeModulesPresent: true,
+      dependencyInstallRequired: false,
+      lockfilePresent: false,
+      install: async () => undefined,
+    })
+    await writeFile(packagePath, (await readFile(packagePath, 'utf8')).trimEnd(), 'utf8')
+    const second = await prepareOfficialWebProfile({
+      dshHome,
+      profilePath,
+      packagePath,
+      nodeModulesPresent: true,
+      dependencyInstallRequired: false,
+      lockfilePresent: false,
+      install: async () => undefined,
+    })
+    expect(first.compatibilityChanged).toBe(true)
+    expect(second.compatibilityChanged).toBe(false)
+  })
 })

@@ -1,6 +1,7 @@
 import { access, mkdir, readdir, readFile, rename, writeFile, cp } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
-import { dirname, join, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { basename, dirname, join, resolve } from 'node:path'
 
 export interface SessionDurabilityOptions {
   dshHome: string
@@ -64,6 +65,36 @@ export function isTranscriptFileName(name: string): boolean {
   return /^session(?:\.v\d+)?\.jsonl\.zstd$/i.test(name)
 }
 
+/**
+ * Format rank of a transcript file name. Official runtimes keep the previous
+ * transcript beside a bumped one during an upgrade, so a directory can hold
+ * `session.v2.jsonl.zstd` and `session.v3.jsonl.zstd` at once. Reading the
+ * lower rank would rebuild an index from a superseded transcript.
+ */
+function transcriptFormatRank(name: string): number {
+  const match = /^session(?:\.v(\d+))?\.jsonl\.zstd$/i.exec(name)
+  if (match === null) return -1
+  return match[1] === undefined ? 1 : Number.parseInt(match[1], 10)
+}
+
+/** Strip both the `session-` prefix and any `session.vN` suffix from a directory name. */
+export function sessionIdFromDirectoryName(name: string): string {
+  const withoutPrefix = name.toLowerCase().startsWith('session-') ? name.slice('session-'.length) : name
+  return withoutPrefix.replace(/\.v\d+$/i, '')
+}
+
+/**
+ * Whether a directory under `sessions/` can hold a transcript at all. The
+ * official runtime uses `session-<id>`; imported sessions use `import-<id>`;
+ * earlier builds dropped the prefix and used the bare session UUID.
+ */
+export function isSessionDirectoryName(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.startsWith('session-')
+    || lower.startsWith('import-')
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(lower)
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path)
@@ -124,6 +155,8 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.dhs-durability-${process.pid}-${Math.random().toString(16).slice(2)}.tmp`
   await mkdir(dirname(path), { recursive: true })
   try {
+    // A plain write can be truncated by the same crash that triggered the
+    // repair, and workspace.json is the session index the UI reads first.
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
     await rename(temporary, path)
   } finally {
@@ -131,6 +164,18 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
       const { rm } = await import('node:fs/promises')
       await rm(temporary, { force: true })
     }
+  }
+}
+
+/** Publish an index file under the name the official runtime reads. */
+async function writeIndexAtomic(path: string, value: unknown): Promise<void> {
+  try {
+    await writeJsonAtomic(path, value)
+  } catch (error) {
+    // A transcript already open for appending makes Windows refuse the rename;
+    // the durability pass must never fail a restart because of that.
+    if (await exists(path)) return
+    throw error
   }
 }
 
@@ -190,6 +235,26 @@ function normalizeWorkspaceSessionLinks(workspaces: JsonRecord, knownSessionIds:
   return changed
 }
 
+/** Prefer the newest, highest-format transcript so a superseded file never wins. */
+function pickTranscript(records: SessionRecord[]): SessionRecord {
+  return records.reduce((best, candidate) => (compareTranscripts(candidate, best) > 0 ? candidate : best))
+}
+
+function compareTranscripts(left: SessionRecord, right: SessionRecord): number {
+  const leftName = left.transcriptPath?.split(/[\\/]/).pop() ?? ''
+  const rightName = right.transcriptPath?.split(/[\\/]/).pop() ?? ''
+  const rank = transcriptFormatRank(leftName) - transcriptFormatRank(rightName)
+  if (rank !== 0) return rank
+  const leftModified = Number.parseFloat(left.transcriptSignature?.split(':')[1] ?? '')
+  const rightModified = Number.parseFloat(right.transcriptSignature?.split(':')[1] ?? '')
+  if (Number.isFinite(leftModified) && Number.isFinite(rightModified) && leftModified !== rightModified) {
+    return leftModified - rightModified
+  }
+  return left.transcriptPath !== null && right.transcriptPath !== null
+    ? left.transcriptPath.localeCompare(right.transcriptPath)
+    : 0
+}
+
 async function scanSessions(dshHome: string): Promise<Map<string, SessionRecord>> {
   const result = new Map<string, SessionRecord>()
   const indexRoot = join(dshHome, 'storages', 'session_projcache', 'sessions')
@@ -203,13 +268,15 @@ async function scanSessions(dshHome: string): Promise<Map<string, SessionRecord>
       transcriptSignature: null,
     })
   }
+  const transcripts = new Map<string, SessionRecord[]>()
   for (const path of await listFiles(join(dshHome, 'sessions'), name => isTranscriptFileName(name))) {
-    // Imported sessions use an `import-*` directory while native sessions use
-    // `session-*`; both are valid session IDs and must be indexed alike.
+    // Imported sessions use an `import-*` directory, earlier builds a bare
+    // session UUID, native sessions `session-*`; all of them are valid session
+    // IDs and must be indexed alike.
     const match = /[\\/]([^\\/]+)[\\/]session(?:\.v\d+)?\.jsonl\.zstd$/i.exec(path)
-    if (match === null) continue
-    const directoryId = match[1]
-    const id = directoryId.startsWith('session-') ? directoryId.slice('session-'.length) : directoryId
+    if (match === null || !isSessionDirectoryName(match[1])) continue
+    const id = sessionIdFromDirectoryName(match[1])
+    if (id === '') continue
     const current = result.get(id) ?? {
       id,
       indexPath: null,
@@ -217,10 +284,13 @@ async function scanSessions(dshHome: string): Promise<Map<string, SessionRecord>
       indexSignature: null,
       transcriptSignature: null,
     }
-    current.transcriptPath = path
-    current.transcriptSignature = await fileSignature(path)
-    result.set(id, current)
+    transcripts.set(id, [...(transcripts.get(id) ?? []), {
+      ...current,
+      transcriptPath: path,
+      transcriptSignature: await fileSignature(path),
+    }])
   }
+  for (const [id, records] of transcripts) result.set(id, pickTranscript(records))
   return result
 }
 
@@ -322,7 +392,9 @@ export interface RecoveredSessionIndex {
 
 /** Rebuild missing session indexes from durable transcript headers/events. */
 export async function recoverMissingSessionIndexes(dshHome: string): Promise<RecoveredSessionIndex[]> {
-  const sessions = await scanSessions(dshHome)
+  // A session written moments before the restart can appear mid-scan; wait for
+  // the directory listing to settle so recovery does not race the flush.
+  const sessions = await waitForStableScan(dshHome, 0)
   const recovered: RecoveredSessionIndex[] = []
   for (const session of sessions.values()) {
     if (session.transcriptPath === null || session.indexPath !== null) continue
@@ -330,7 +402,7 @@ export async function recoverMissingSessionIndexes(dshHome: string): Promise<Rec
     if (summary === null) continue
     const indexPath = join(dshHome, 'storages', 'session_projcache', 'sessions', `session-${session.id}.json`)
     if (await exists(indexPath)) continue
-    await writeJsonAtomic(indexPath, buildRecoveredIndex(summary))
+    await writeIndexAtomic(indexPath, buildRecoveredIndex(summary))
     recovered.push({ id: session.id, indexPath, cwd: summary.cwd, title: summary.title })
   }
   return recovered
@@ -361,7 +433,29 @@ export async function repairWorkspaceLinks(dshHome: string, backupRoot: string):
     }
     const cwd = indexCwd(parsed)
     if (cwd === null) continue
-    const matches = Object.entries(parts.workspaces).filter(([, value]) => workspacePath(value) !== null && normalizePath(workspacePath(value) as string) === normalizePath(cwd))
+    let matches = Object.entries(parts.workspaces).filter(([, value]) => workspacePath(value) !== null && normalizePath(workspacePath(value) as string) === normalizePath(cwd))
+    if (matches.length === 0) {
+      // A session whose workspace was pruned (or never registered) would stay
+      // invisible forever: the official UI only lists sessions through a
+      // workspace entry. Recreate the entry so the session becomes reachable.
+      // The record shape must match the runtime's schema exactly — the map key
+      // is the id, and the value carries path/title/sessionIds/createdAt/updatedAt.
+      const workspaceId = randomUUID()
+      const timestamp = new Date().toISOString()
+      const workspace: JsonRecord = {
+        path: cwd,
+        title: basename(cwd),
+        sessionIds: [],
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }
+      parts.workspaces[workspaceId] = workspace
+      parts.global.workspaceIds = Array.isArray(parts.global.workspaceIds)
+        ? [...new Set([...parts.global.workspaceIds.filter((value): value is string => typeof value === 'string'), workspaceId])]
+        : [workspaceId]
+      changed = true
+      matches = [[workspaceId, workspace]]
+    }
     if (matches.length !== 1) continue
     const [workspaceId, workspace] = matches[0]
     if (!isRecord(workspace)) continue
@@ -376,7 +470,7 @@ export async function repairWorkspaceLinks(dshHome: string, backupRoot: string):
     changed = true
   }
   if (!changed) return []
-  const backupPath = await createBackup(backupRoot, () => new Date(), workspaceFile)
+  const backupPath = await createBackup(backupRoot, () => new Date(), workspaceFile, dshHome, linked)
   const nextDocument = isRecord(document) ? document : {}
   nextDocument.global = parts.global
   nextDocument.tables = parts.tables
@@ -385,13 +479,39 @@ export async function repairWorkspaceLinks(dshHome: string, backupRoot: string):
   return linked
 }
 
-async function createBackup(root: string, now: () => Date, workspacePathname: string): Promise<string> {
+/**
+ * Snapshot the state a restart can destroy: the workspace links plus every
+ * per-session index and transcript. Copying only `workspace.json` recorded the
+ * links but not the data behind them, so a partial transcript could never be
+ * restored from a durability backup.
+ */
+export async function createBackup(
+  root: string,
+  now: () => Date,
+  workspacePathname: string,
+  dshHome: string,
+  sessionIds: Iterable<string> = [],
+): Promise<string> {
   const stamp = now().toISOString().replaceAll(':', '-').replaceAll('.', '-')
   let path = join(root, `session-durability-${stamp}`)
   let suffix = 1
   while (await exists(path)) path = join(root, `session-durability-${stamp}-${suffix++}`)
   await mkdir(path, { recursive: true })
   await cp(workspacePathname, join(path, 'workspace.json'))
+  const sessions = await scanSessions(dshHome)
+  const wanted = new Set(sessionIds)
+  for (const session of sessions.values()) {
+    if (wanted.size > 0 && !wanted.has(session.id)) continue
+    const targetRoot = join(path, 'sessions', session.id)
+    if (session.indexPath !== null) {
+      await mkdir(targetRoot, { recursive: true })
+      await cp(session.indexPath, join(targetRoot, 'index.json'))
+    }
+    if (session.transcriptPath !== null) {
+      await mkdir(targetRoot, { recursive: true })
+      await cp(session.transcriptPath, join(targetRoot, session.transcriptPath.split(/[\\/]/).pop() as string))
+    }
+  }
   return path
 }
 
@@ -501,7 +621,7 @@ export class SessionDurabilityGuard {
           backupPath: null,
         }
       }
-      backupPath = await createBackup(this.backupRoot, this.now, workspaceFile)
+      backupPath = await createBackup(this.backupRoot, this.now, workspaceFile, this.dshHome, repairedSessionIds)
       const nextDocument = isRecord(workspaceDocument) ? workspaceDocument : {}
       nextDocument.global = workspaceParts.global
       nextDocument.tables = workspaceParts.tables

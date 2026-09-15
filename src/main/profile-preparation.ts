@@ -16,6 +16,45 @@ export interface PrepareOfficialWebProfileOptions {
 export interface PrepareOfficialWebProfileResult {
   compatibilityChanged: boolean
   rebuiltDependencies: boolean
+  /** True when a previous install failed recently and was skipped. */
+  installSkipped?: boolean
+}
+
+/**
+ * A failed dependency install is expensive to retry: pnpm resolves the whole
+ * graph over the network before reporting the failure, which delays startup by
+ * many seconds on every launch. Remember the failure so a still-broken
+ * registry does not get retried on every boot, while the next attempt is
+ * allowed once the quiet period elapses.
+ */
+const INSTALL_FAILURE_TTL_MS = 6 * 60 * 60 * 1000
+
+function installFailureMarkerPath(profilePath: string): string {
+  return join(profilePath, '.desktop-install-failed.json')
+}
+
+async function readRecentInstallFailure(profilePath: string): Promise<boolean> {
+  try {
+    const marker = JSON.parse(await readFile(installFailureMarkerPath(profilePath), 'utf8')) as unknown
+    if (typeof marker !== 'object' || marker === null) return false
+    const at = (marker as { at?: unknown }).at
+    if (typeof at !== 'number') return false
+    return Date.now() - at < INSTALL_FAILURE_TTL_MS
+  } catch {
+    return false
+  }
+}
+
+async function recordInstallFailure(profilePath: string): Promise<void> {
+  try {
+    await writeFile(installFailureMarkerPath(profilePath), JSON.stringify({ at: Date.now() }), 'utf8')
+  } catch {
+    // A missing marker only costs one extra retry; never fail the boot for it.
+  }
+}
+
+async function clearInstallFailure(profilePath: string): Promise<void> {
+  await rm(installFailureMarkerPath(profilePath), { force: true }).catch(() => undefined)
 }
 
 /**
@@ -72,6 +111,14 @@ export async function prepareOfficialWebProfile(
       || !options.nodeModulesPresent
     if (!shouldInstall) return { compatibilityChanged, rebuiltDependencies: false }
 
+    // Skip a retry that recently failed: the registry is unreachable or its
+    // metadata is broken, and re-resolving the graph would only delay boot
+    // again. The caller keeps whatever complete tree is already on disk — the
+    // compatibility files above were already refreshed in place.
+    if (await readRecentInstallFailure(options.profilePath)) {
+      return { compatibilityChanged, rebuiltDependencies: false, installSkipped: true }
+    }
+
     const args = ['install']
     args.push(options.lockfilePresent && !compatibility.changed && !options.dependencyInstallRequired
       ? '--frozen-lockfile'
@@ -88,6 +135,7 @@ export async function prepareOfficialWebProfile(
       await rm(nodeModulesBackup, { recursive: true, force: true })
       nodeModulesBackup = null
     }
+    await clearInstallFailure(options.profilePath)
   } catch (error) {
     if (nodeModulesBackup !== null) {
       await rm(join(options.profilePath, 'node_modules'), { recursive: true, force: true })
@@ -95,6 +143,7 @@ export async function prepareOfficialWebProfile(
     }
     await restoreOptional(options.packagePath, packageBefore)
     await restoreOptional(lockfilePath, lockfileBefore)
+    await recordInstallFailure(options.profilePath)
     throw error
   }
   return { compatibilityChanged, rebuiltDependencies: true }

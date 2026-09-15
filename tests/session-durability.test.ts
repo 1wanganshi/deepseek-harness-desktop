@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SessionDurabilityGuard, isTranscriptFileName, repairWorkspaceLinks } from '../src/main/session-durability.js'
+import { SessionDurabilityGuard, isSessionDirectoryName, isTranscriptFileName, repairWorkspaceLinks } from '../src/main/session-durability.js'
 
 const roots: string[] = []
 const project = 'D:\\vibecoding\\DHS1'
@@ -197,6 +197,58 @@ describe('session durability guard', () => {
     })
   })
 
+  it('accepts every session directory name the official runtime and older builds write', () => {
+    expect(isSessionDirectoryName('session-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe(true)
+    expect(isSessionDirectoryName('import-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe(true)
+    expect(isSessionDirectoryName('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe(true)
+    expect(isSessionDirectoryName('SESSION-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA')).toBe(true)
+    expect(isSessionDirectoryName('--D-vibecoding-DHS1--')).toBe(false)
+    expect(isSessionDirectoryName('session.jsonl.zstd')).toBe(false)
+    expect(isSessionDirectoryName('storages')).toBe(false)
+  })
+
+  it('indexes a bare-UUID session directory left behind by an earlier build', async () => {
+    const { dshHome, backupRoot } = await setup()
+    await writeWorkspace(dshHome, [{ id: 'dhs1', path: project }])
+    const guard = new SessionDurabilityGuard({ dshHome, backupRoot })
+    await guard.captureBaseline()
+    const id = '88888888-8888-4888-8888-888888888888'
+    const dir = join(dshHome, 'sessions', '--D-vibecoding-DHS1--', id)
+    await mkdir(dir, { recursive: true })
+    const frames = [
+      { type: 'session', version: 0, id, createdAt: 1700000000000, cwd: project },
+      { type: 'user/message', seq: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '早期版本写入的会话' }] } },
+    ]
+    await writeFile(join(dir, 'session.jsonl.zstd'), Buffer.concat(frames.map(value => zstdCompressSync(Buffer.from(`${JSON.stringify(value)}\n`)))))
+
+    const report = await guard.verifyForRestart()
+
+    expect(report.safe).toBe(true)
+    expect(report.checkedSessionIds).toEqual([id])
+    const index = JSON.parse(await readFile(join(dshHome, 'storages', 'session_projcache', 'sessions', `session-${id}.json`), 'utf8')) as { record: { rows: { title: { val: string } } } }
+    expect(index.record.rows.title.val).toBe('早期版本写入的会话')
+    await expect(workspaceSessionIds(dshHome, 'dhs1')).resolves.toContain(`session-${id}`)
+  })
+
+  it('prefers the newest transcript version when a session directory holds several', async () => {
+    const { dshHome, backupRoot } = await setup()
+    await writeWorkspace(dshHome, [{ id: 'dhs1', path: project }])
+    const guard = new SessionDurabilityGuard({ dshHome, backupRoot })
+    await guard.captureBaseline()
+    const id = '99999999-9999-4999-8999-999999999999'
+    const dir = join(dshHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`)
+    await mkdir(dir, { recursive: true })
+    const frame = { type: 'session', version: 0, id, createdAt: 1700000000000, cwd: project }
+    await writeFile(join(dir, 'session.jsonl.zstd'), zstdCompressSync(Buffer.from(`${JSON.stringify(frame)}\n`)))
+    await writeFile(join(dir, 'session.v2.jsonl.zstd'), zstdCompressSync(Buffer.from(`${JSON.stringify(frame)}\n`)))
+    await writeIndex(dshHome, id)
+
+    const report = await guard.verifyForRestart()
+
+    expect(report.blockers.filter(blocker => blocker.sessionId === id)).toEqual([])
+    expect(report.checkedSessionIds).toEqual([id])
+  })
+
   it('atomically records a new complete session in its sole matching workspace', async () => {
     const { dshHome, backupRoot } = await setup()
     await writeWorkspace(dshHome, [{ id: 'dhs1', path: project }])
@@ -240,4 +292,32 @@ describe('session durability guard', () => {
       blockers: [{ sessionId: id, reason: 'ambiguous-workspace' }],
     })
   })
+
+  it('recreates a missing workspace so its sessions stay reachable', async () => {
+    const { dshHome, backupRoot } = await setup()
+    // The workspace list only holds one entry while sessions exist under a
+    // second cwd — the official UI lists sessions per workspace, so those
+    // sessions would be invisible without a recreated entry.
+    await writeWorkspace(dshHome, [{ id: 'known', path: 'D:\\vibecoding\\other' }])
+    const id = '77777777-7777-4777-8777-777777777777'
+    await writeCompleteSession(dshHome, id)
+
+    const linked = await repairWorkspaceLinks(dshHome, backupRoot)
+    expect(linked).toContain(id)
+
+    const document = JSON.parse(await readFile(join(dshHome, 'storages', 'workspace.json'), 'utf8')) as {
+      global: { workspaceIds: string[] }
+      tables: { workspaces: Record<string, { path?: string; sessionIds?: string[] }> }
+    }
+    const recreated = Object.values(document.tables.workspaces)
+      .find(workspace => normalizeTestPath(workspace.path ?? '') === normalizeTestPath(project))
+    expect(recreated).toBeDefined()
+    // Workspace links store the canonical `session-<id>` key.
+    expect(recreated?.sessionIds ?? []).toContain(`session-${id}`)
+    expect(document.global.workspaceIds.length).toBe(2)
+  })
 })
+
+function normalizeTestPath(value: string): string {
+  return value.replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase()
+}

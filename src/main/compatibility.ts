@@ -251,7 +251,13 @@ async function readJson(path: string): Promise<JsonRecord> {
 
 async function writeIfChanged(path: string, content: string): Promise<boolean> {
   try {
-    if (await readFile(path, 'utf8') === content) return false
+    // Compare without trailing-whitespace noise: older profiles were written
+    // without a final newline, and treating that as a real change made every
+    // boot rewrite the manifest, report `changed`, and trigger a full
+    // dependency install that took seconds and always failed on a broken
+    // registry. Only meaningful content differences should count.
+    const existing = await readFile(path, 'utf8')
+    if (existing.trimEnd() === content.trimEnd()) return false
   } catch {
     // The file will be created below.
   }

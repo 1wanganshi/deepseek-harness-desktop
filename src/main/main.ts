@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, Menu, WebContentsView, Tray, nativeImage, ipcMain, session } from 'electron'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundledPnpmScript, runCommand } from './command.js'
 import { DiagnosticsStore } from './diagnostics.js'
@@ -61,6 +61,8 @@ let prepareActiveProfile: () => Promise<void> = async () => undefined
 let repairBundledAppDependencies: () => Promise<{ fixed: boolean; detail: string }> = async () => ({ fixed: false, detail: '桌面壳依赖维修尚未初始化' })
 let runtimePaths: ReturnType<typeof createRuntimePaths> | null = null
 let sessionDurability: SessionDurabilityGuard | null = null
+let sessionDurabilitySweepTimer: ReturnType<typeof setInterval> | null = null
+let sessionDurabilitySweepInFlight = false
 let configurationDurability: ConfigurationDurabilityGuard | null = null
 let authenticatedHarnessAdvertisedUrl: string | null = null
 let authenticatedHarnessTargetUrl: string | null = null
@@ -78,9 +80,28 @@ let migration: LegacyMigrationStatus = {
   copiedPaths: [],
   error: null,
 }
+/**
+ * The repository this desktop shell is developed in. The packaged app knows it
+ * from its own resources; a development checkout falls back to the source tree
+ * so the constant cannot drift away from the actual checkout location.
+ */
+function resolveProjectCwd(appRoot: string): string {
+  const candidates = [join(appRoot, '..', '..'), appRoot]
+  for (const candidate of candidates) {
+    const resolved = resolve(candidate)
+    if (existsSync(join(resolved, 'package.json')) && existsSync(join(resolved, 'src', 'main'))) return resolved
+  }
+  return resolve(appRoot)
+}
+
+// Declared before `projectSessionMerge`: the initializer below reads this
+// binding at module-evaluation time, and a later declaration would put it in
+// the temporal dead zone.
+const DHS1_PROJECT_CWD = resolveProjectCwd(app.getAppPath())
+
 let projectSessionMerge: ProjectSessionMergeStatus = {
   status: 'not-found',
-  projectCwd: 'D:\\vibecoding\\DHS1',
+  projectCwd: DHS1_PROJECT_CWD,
   sourceSessionIds: [],
   copiedSessionIds: [],
   skippedSessionIds: [],
@@ -92,7 +113,17 @@ let projectSessionMerge: ProjectSessionMergeStatus = {
   error: null,
 }
 
-const DHS1_PROJECT_CWD = 'D:\\vibecoding\\DHS1'
+const SESSION_DURABILITY_SWEEP_MS = 120_000
+
+/**
+ * One backup location for every session repair path — the startup pass, the
+ * periodic sweep, the exit check and the manual repair must all write snapshots
+ * beside each other, otherwise a restore looks in a directory the other path
+ * never wrote to.
+ */
+function sessionDurabilityBackupRoot(): string {
+  return join(app.getPath('userData'), 'session-durability-backups')
+}
 
 const APP_USER_MODEL_ID = 'com.deepseek.harness.desktop'
 if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
@@ -148,7 +179,9 @@ async function createServices(): Promise<void> {
     onState: state => {
       sendDesktopEvent('desktop:runtime-state', state)
       if (state.status === 'running' && state.url !== null) void loadHarness(state.url)
+      if (state.status === 'running') scheduleSessionDurabilitySweep()
       if (state.status !== 'running') {
+        stopSessionDurabilitySweep()
         authenticatedHarnessAdvertisedUrl = null
         authenticatedHarnessTargetUrl = null
         harnessLoader?.setDesiredUrl(null)
@@ -159,7 +192,7 @@ async function createServices(): Promise<void> {
   })
   sessionDurability = new SessionDurabilityGuard({
     dshHome: paths.dshHome,
-    backupRoot: join(app.getPath('userData'), 'session-durability-backups'),
+    backupRoot: sessionDurabilityBackupRoot(),
   })
   configurationDurability = new ConfigurationDurabilityGuard({
     dshHome: paths.dshHome,
@@ -383,7 +416,7 @@ async function startRuntime(): Promise<RuntimeState> {
     }
   }
   const recovered = await recoverMissingSessionIndexes(runtimePaths.dshHome)
-  const linked = await repairWorkspaceLinks(runtimePaths.dshHome, join(app.getPath('userData'), 'session-durability-backups'))
+  const linked = await repairWorkspaceLinks(runtimePaths.dshHome, sessionDurabilityBackupRoot())
   if (recovered.length > 0) {
     void diagnostics.log(`已从持久化转录恢复 ${recovered.length} 个会话索引`)
   }
@@ -391,6 +424,44 @@ async function startRuntime(): Promise<RuntimeState> {
   const state = await runtime.start()
   await sessionDurability?.captureBaseline()
   return state
+}
+
+/**
+ * A session directory can appear on disk while the workspace link that makes it
+ * visible in the UI is still missing — the transcript gets flushed lazily, so
+ * the two are written at different moments. Linking only at startup and at exit
+ * left such a session invisible for the whole run, which is exactly the report
+ * "yesterday's session was lost". Re-run the link pass periodically so new
+ * transcripts surface within a few minutes instead of after the next restart.
+ */
+function scheduleSessionDurabilitySweep(): void {
+  if (sessionDurabilitySweepTimer !== null || runtimePaths === null) return
+  sessionDurabilitySweepTimer = setInterval(() => {
+    if (runtimePaths === null || sessionDurabilitySweepInFlight) return
+    sessionDurabilitySweepInFlight = true
+    void (async () => {
+      try {
+        // Repairing workspace links means rewriting both per-session indexes and
+        // `workspace.json`, so never sweep while a restart or an exit check owns
+        // the same files.
+        const state = runtime.getState().status
+        if (state !== 'running' && state !== 'recovering') return
+        const linked = await repairWorkspaceLinks(runtimePaths.dshHome, sessionDurabilityBackupRoot())
+        if (linked.length > 0) {
+          void diagnostics.log(`已自动将 ${linked.length} 个新会话挂回所属工作区`)
+        }
+      } catch (error) {
+        void diagnostics.log(`会话持久化巡检失败：${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        sessionDurabilitySweepInFlight = false
+      }
+    })()
+  }, SESSION_DURABILITY_SWEEP_MS)
+}
+
+function stopSessionDurabilitySweep(): void {
+  if (sessionDurabilitySweepTimer !== null) clearInterval(sessionDurabilitySweepTimer)
+  sessionDurabilitySweepTimer = null
 }
 
 async function createWindow(): Promise<void> {
@@ -943,20 +1014,20 @@ async function runRepairPipeline(): Promise<RepairReport> {
   }
 
   try {
-    await beginCheck('provider-compatibility')
+    await beginCheck('vision-capability')
     if (runtimePaths === null) throw new Error('运行目录尚未初始化')
     const vision = await repairVisionCapabilities(runtimePaths.dshHome, { force: true })
     if (vision.changed) {
       const details: string[] = []
       if (vision.added.length > 0) details.push(`启用识图：${vision.added.join('、')}`)
       if (vision.removed.length > 0) details.push(`移除误标：${vision.removed.join('、')}`)
-      complete('provider-compatibility', 'fixed', `已校准模型视觉能力；${details.join('；')}`)
+      complete('vision-capability', 'fixed', `已校准模型视觉能力；${details.join('；')}`)
       void diagnostics.log(`已按实际探测结果校准模型视觉能力：${details.join('；')}`)
     } else {
-      complete('provider-compatibility', 'ok', '模型视觉能力与探测结果一致', '未发现不一致的识图能力声明')
+      complete('vision-capability', 'ok', '模型视觉能力与探测结果一致', '未发现不一致的识图能力声明')
     }
   } catch (error) {
-    complete('provider-compatibility', 'failed', message(error), '模型视觉能力校准失败')
+    complete('vision-capability', 'failed', message(error), '模型视觉能力校准失败')
   }
 
   try {
