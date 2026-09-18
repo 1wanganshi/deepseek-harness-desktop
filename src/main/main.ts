@@ -207,11 +207,11 @@ async function createServices(): Promise<void> {
     { ...process.env, DSH_HOME: paths.dshHome },
     { timeoutMs: 600_000 },
   )
-  repairBundledAppDependencies = async () => {
-    const workerPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
-    // 0.1.5 renamed the workflow bundle: the monolithic dsh-workflow package was
-    // split into dsh-tool-workflow plus the worker-thread runtime.
-    const workflowPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-tool-workflow')
+    repairBundledAppDependencies = async () => {
+      // 0.1.6 replaced the standalone worker-thread runtime with the PTC
+      // workflow package; check the packages the runtime actually loads.
+      const workerPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-workflow-ptc')
+      const workflowPath = join(appRoot, 'node_modules', '@deepseek-ai', 'dsh-tool-workflow')
     const repaired = await repairBundledDependencies({
       workerPath,
       requiredPackagePaths: [workflowPath],

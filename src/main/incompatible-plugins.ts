@@ -143,14 +143,18 @@ export async function mitigateIncompatibleTaskBoard(options: {
 function isOlderThanTaskBoardCompatibleRuntime(version: string): boolean {
   const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/)
   if (match === null) return true
-  // Any prerelease (has -suffix) is below the stable 0.1.2 contract
-  if (match[4] !== undefined) return true
   const major = Number(match[1])
   const minor = Number(match[2])
   const patch = Number(match[3])
+  // Compare the numeric core first: a later pre-release (0.1.6-alpha.2) is
+  // newer than the stable contract floor (0.1.2), so treating every prerelease
+  // as older would wrongly disable plugins on current runtimes.
   if (major !== 0) return major < 0
   if (minor !== 1) return minor < 1
-  return patch < 2
+  if (patch !== 2) return patch < 2
+  // Same numeric core as the floor: a prerelease is only older than 0.1.2 when
+  // it sits on the 0.1.2 line itself (for example 0.1.2-alpha.1).
+  return match[4] !== undefined
 }
 
 function readBundles(manifest: Record<string, unknown>): string[] {

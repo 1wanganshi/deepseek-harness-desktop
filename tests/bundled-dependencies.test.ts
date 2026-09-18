@@ -7,7 +7,7 @@ import { repairBundledDependencies } from '../src/main/bundled-dependencies.js'
 describe('bundled dependency repair', () => {
   it('installs production dependencies when the worker package is missing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bundled-repair-'))
-    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
+    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-ptc')
     const commands: string[][] = []
 
     const repaired = await repairBundledDependencies({
@@ -26,7 +26,7 @@ describe('bundled dependency repair', () => {
 
   it('does not reinstall when the worker package is already present', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bundled-present-'))
-    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
+    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-ptc')
     await mkdir(join(workerPath, 'lib'), { recursive: true })
     await writeFile(join(workerPath, 'package.json'), '{}')
     await writeFile(join(workerPath, 'lib', 'index.js'), '')
@@ -37,7 +37,7 @@ describe('bundled dependency repair', () => {
 
   it('repairs the worker peer dependency when it is missing from the app', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-bundled-peer-repair-'))
-    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-worker-thread')
+    const workerPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-workflow-ptc')
     const workflowPath = join(root, 'node_modules', '@deepseek-ai', 'dsh-tool-workflow')
     await mkdir(join(workerPath, 'lib'), { recursive: true })
     await writeFile(join(workerPath, 'package.json'), '{}')

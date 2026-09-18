@@ -247,6 +247,24 @@ describe('persona preset schema migration', () => {
     const content = await readFile(presetFile, 'utf8')
     expect(content).toContain('prefix: Custom persona text.')
   })
+  it('treats a newer prerelease runtime as compatible with the task-board plugin', async () => {
+    // 0.1.6-alpha.2 is numerically newer than the 0.1.2 contract floor, so the
+    // version comparison must not classify every prerelease as too old.
+    const profilePath = await createWebAllProfile('0.1.6-alpha.2')
+    const result = await mitigateIncompatibleTaskBoard({ profilePath, runtimeVersion: '0.1.6-alpha.2' })
+
+    expect(result.taskBoardDisabled).toBe(false)
+    await expect(readFile(join(profilePath, 'cordis.patch.yml'), 'utf8')).resolves.not.toContain('id: web-ui-task-board')
+  })
+
+  it('keeps the aggregate doctor supervisor disabled on a newer runtime', async () => {
+    const profilePath = await createWebAllProfile('0.1.6-alpha.2')
+    await mitigateIncompatibleTaskBoard({ profilePath, runtimeVersion: '0.1.6-alpha.2' })
+
+    const patch = await readFile(join(profilePath, 'cordis.patch.yml'), 'utf8')
+    expect(patch).toContain('id: web-ui-doctor')
+    expect(patch).toContain('disabled: true')
+  })
 })
 
 async function createWebAllProfile(runtimeVersion: string, bundles = ['@linxin666/dsh-web-all']): Promise<string> {
