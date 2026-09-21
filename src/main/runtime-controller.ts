@@ -48,6 +48,23 @@ export function waitForChildExit(child: ChildProcess, timeoutMs: number): Promis
 }
 
 /**
+ * Ask the Windows Harness tree to shut down gracefully. `taskkill` without
+ * `/F` posts WM_CLOSE to every window of the tree, which is the only
+ * console-less equivalent of SIGTERM Windows offers. The Harness needs that
+ * window to flush in-flight transcript frames and rewrite its session index —
+ * the previous unconditional `/T /F` destroyed both, which is how a session
+ * completed moments before exit vanished from the UI.
+ */
+export async function requestWindowsRuntimeShutdown(
+  pid: number,
+  execFileImpl: typeof execFile = execFile,
+): Promise<void> {
+  await new Promise<void>(resolve => {
+    execFileImpl('taskkill', ['/pid', String(pid), '/T'], { windowsHide: true }, () => resolve())
+  })
+}
+
+/**
  * Stop the Windows process tree while the Harness parent still exists. DHS
  * plugins can launch supervisor processes which otherwise outlive a graceful
  * parent shutdown and retain the packaged Node executable.
@@ -409,9 +426,13 @@ export class RuntimeController {
   private async terminateChild(child: ChildProcess): Promise<void> {
     if (child.exitCode !== null || child.killed) return
     if (process.platform === 'win32' && child.pid !== undefined) {
-      // Taskkill must run before the parent exits. A graceful exit can detach
-      // DHS plugin supervisors, leaving the embedded node.exe running.
-      await terminateWindowsRuntimeTree(child.pid)
+      // Give the Harness a real window to flush its session state before the
+      // tree is destroyed. Taskkill must still run before the parent exits: a
+      // clean self-exit can detach DHS plugin supervisors, leaving the
+      // embedded node.exe running and holding the DSH_HOME lock.
+      await requestWindowsRuntimeShutdown(child.pid)
+      const exited = await waitForChildExit(child, CHILD_SHUTDOWN_GRACE_MS)
+      if (!exited) await terminateWindowsRuntimeTree(child.pid)
       await this.sleep(100)
       return
     }

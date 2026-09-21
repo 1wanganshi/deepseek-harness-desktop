@@ -1,5 +1,5 @@
 #!/bin/bash
-# DeepSeek Harness Desktop 0.3.2 macOS 安装脚本
+# DeepSeek Harness Desktop 0.3.3 macOS 安装脚本
 # 解压 zip 后，双击此文件即可安装到 /Applications。
 set -e
 

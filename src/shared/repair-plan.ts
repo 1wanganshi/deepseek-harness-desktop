@@ -31,6 +31,12 @@ export const REPAIR_PLAN: ReadonlyArray<RepairPlanStep> = [
     repairMethod: '在符合条件的 Provider 下写入 compat.supportsDeveloperRole: false，保留 reasoningEfforts 配置。',
   },
   {
+    id: 'vision-capability',
+    label: '模型视觉能力',
+    description: '按真实探测结果校准各模型的识图能力声明，避免误标导致请求失败。',
+    repairMethod: '为本机真实探测到识图能力的模型补上声明，并移除探测结果不支持的误标。',
+  },
+  {
     id: 'sessions',
     label: 'DHS1 会话库',
     description: '检查 D:\\vibecoding\\DHS1 是否有历史会话仍留在旧 DSH_HOME。',

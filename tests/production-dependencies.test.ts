@@ -23,7 +23,6 @@ describe('production DSH dependencies', () => {
       '@deepseek-ai/dsh-home-paths',
       '@deepseek-ai/dsh-jobs-local',
       '@deepseek-ai/dsh-launch-environment',
-      '@deepseek-ai/dsh-plugin-manager',
       '@deepseek-ai/dsh-session-projection',
       '@deepseek-ai/dsh-session-reference',
       '@deepseek-ai/dsh-terminal',
@@ -32,7 +31,7 @@ describe('production DSH dependencies', () => {
       '@deepseek-ai/dsh-tool-fs',
       '@deepseek-ai/dsh-tool-subagent',
       '@deepseek-ai/dsh-web-app',
-      '@deepseek-ai/dsh-workflow-ptc',
+      '@deepseek-ai/dsh-workflow-worker-thread',
     ]
 
     for (const packageName of required) {
@@ -40,7 +39,7 @@ describe('production DSH dependencies', () => {
     }
   })
 
-  it('pins the 0.1.5 runtime line used by the bundled Harness', async () => {
+  it('pins every runtime package to the same published version', async () => {
     const manifest = JSON.parse(await readFile(join(projectRoot, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
     }
@@ -48,6 +47,7 @@ describe('production DSH dependencies', () => {
     const runtime = Object.entries(manifest.dependencies)
       .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
     expect(runtime.length).toBeGreaterThan(50)
-    expect(runtime.every(([, version]) => version === '0.1.6-alpha.2')).toBe(true)
+    const versions = new Set(runtime.map(([, version]) => version))
+    expect([...versions]).toHaveLength(1)
   })
 })

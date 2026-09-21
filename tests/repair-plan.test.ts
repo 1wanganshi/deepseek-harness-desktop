@@ -9,6 +9,7 @@ describe('repair plan', () => {
       'locks',
       'profile',
       'provider-compatibility',
+      'vision-capability',
       'sessions',
       'data',
       'runtime',
