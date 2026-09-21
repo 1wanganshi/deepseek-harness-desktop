@@ -39,8 +39,15 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Normalize a recorded cwd for comparison. `path.resolve` is deliberately not
+ * used: it interprets a Windows drive path as relative on POSIX hosts, so the
+ * same session compared differently between Windows and macOS runners. The
+ * recorded values already are absolute paths from the runtime, so only the
+ * separator style and a trailing slash need normalizing.
+ */
 function normalizeCwd(value: string): string {
-  return resolve(value).replaceAll('/', '\\').replace(/[\\]+$/, '').toLowerCase()
+  return value.replaceAll('/', '\\').replace(/[\\]+$/, '').toLowerCase()
 }
 
 function recordCwd(value: unknown): string | null {
@@ -318,7 +325,9 @@ async function mergeAggregate(
 export async function mergeLegacyProjectSessions(
   options: ProjectSessionMergeOptions,
 ): Promise<ProjectSessionMergeStatus> {
-  const projectCwd = resolve(options.projectCwd)
+  // Keep the caller's absolute cwd verbatim: resolving it would reinterpret a
+  // Windows drive path on POSIX hosts and break the workspace mapping.
+  const projectCwd = options.projectCwd.replaceAll('/', '\\').replace(/[\\]+$/, '')
   const base: ProjectSessionMergeStatus = {
     status: 'not-found',
     projectCwd,
