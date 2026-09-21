@@ -1,5 +1,5 @@
 import { access, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import YAML from 'yaml'
 
 export type LegacyMigrationState = 'not-found' | 'migrated' | 'synchronized' | 'already-migrated' | 'failed'
@@ -76,6 +76,14 @@ async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path)
     return true
+  } catch {
+    return false
+  }
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile()
   } catch {
     return false
   }
@@ -187,6 +195,60 @@ async function mergeMissingProfilePackage(targetPath: string, sourcePath: string
   return { changed: true, pluginNames: Object.keys(isRecord(source.dependencies) ? source.dependencies : {}).sort() }
 }
 
+/**
+ * Copy one directory tree additively: files already present in the target are
+ * never overwritten. Used to drain the retired DSH home, where the desktop copy
+ * is always the newer one.
+ */
+async function copyMissingTree(source: string, target: string, copied: string[]): Promise<void> {
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const sourcePath = join(source, entry.name)
+    const targetPath = join(target, entry.name)
+    if (entry.isDirectory()) {
+      await mkdir(targetPath, { recursive: true })
+      await copyMissingTree(sourcePath, targetPath, copied)
+      continue
+    }
+    if (!entry.isFile() || await pathExists(targetPath)) continue
+    await mkdir(dirname(targetPath), { recursive: true })
+    await cp(sourcePath, targetPath, { force: false })
+    copied.push(targetPath)
+  }
+}
+
+/**
+ * Drain session and index files that were written to the legacy DSH home after
+ * its one-time import. `synchronizeMigratedLegacyHome` only reconciles settings
+ * and the profile package, so a session started before the desktop shell
+ * existed would stay invisible forever while continuing to occupy disk. The
+ * desktop copy always wins; only genuinely missing files are added.
+ */
+async function adoptMissingLegacySessions(
+  legacyHome: string,
+  targetHome: string,
+  copied: string[],
+): Promise<void> {
+    for (const relativePath of [
+      join('sessions'),
+      join('storages', 'session_projcache', 'sessions'),
+      join('storages', 'session_projcache.json'),
+    ]) {
+      const source = join(legacyHome, relativePath)
+      if (!await pathExists(source)) continue
+      // The aggregate index is a plain JSON file that sits beside the
+      // same-named directory; treating it as a tree made readdir throw ENOTDIR.
+      if (await isFile(source)) {
+        const destination = join(targetHome, relativePath)
+        if (await pathExists(destination)) continue
+        await mkdir(dirname(destination), { recursive: true })
+        await cp(source, destination, { force: false })
+        copied.push(destination)
+        continue
+      }
+      await copyMissingTree(source, join(targetHome, relativePath), copied)
+    }
+}
+
 async function synchronizeMigratedLegacyHome(existing: LegacyMigrationStatus, options: LegacyMigrationOptions): Promise<LegacyMigrationStatus> {
   const legacyHome = resolve(options.legacyHome)
   const targetHome = resolve(options.targetHome)
@@ -204,12 +266,19 @@ async function synchronizeMigratedLegacyHome(existing: LegacyMigrationStatus, op
       changed = profile.changed || changed
       pluginNames = [...new Set([...existing.pluginNames, ...profile.pluginNames])].sort()
     }
+    const copied: string[] = []
+    await adoptMissingLegacySessions(legacyHome, targetHome, copied)
+    changed = copied.length > 0 || changed
+    const copiedPaths = copied.length === 0
+      ? existing.copiedPaths
+      : [...new Set([...existing.copiedPaths, ...copied.map(path => relative(targetHome, path))])]
     return {
       ...existing,
       status: changed ? 'synchronized' : 'already-migrated',
       legacyHome,
       targetHome,
       pluginNames,
+      copiedPaths,
     }
   } catch (error) {
     return {

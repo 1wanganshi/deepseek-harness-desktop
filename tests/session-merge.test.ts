@@ -12,11 +12,11 @@ async function setup() {
   return { root, legacyHome: join(root, 'legacy'), targetHome: join(root, 'target'), backupRoot: join(root, 'backups') }
 }
 
-async function writeSession(home: string, id: string, cwd: string, title: string, blob = `blob-${id}`) {
+async function writeSession(home: string, id: string, cwd: string, title: string, blob = `blob-${id}`, workspace = '--D-vibecoding-DHS1--') {
   const indexPath = join(home, 'storages', 'session_projcache', 'sessions', `session-${id}.json`)
-  const blobPath = join(home, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.jsonl.zstd')
+  const blobPath = join(home, 'sessions', workspace, `session-${id}`, 'session.v3.jsonl.zstd')
   await mkdir(join(home, 'storages', 'session_projcache', 'sessions'), { recursive: true })
-  await mkdir(join(home, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`), { recursive: true })
+  await mkdir(join(home, 'sessions', workspace, `session-${id}`), { recursive: true })
   await writeFile(indexPath, JSON.stringify({ version: 4, record: { identity: { cwd }, rows: { title: { val: title } } } }), 'utf8')
   await writeFile(blobPath, blob, 'utf8')
   return { indexPath, blobPath }
@@ -78,7 +78,7 @@ describe('mergeLegacyProjectSessions', () => {
     expect(first.sourceSessionIds).toEqual(['11111111-1111-4111-8111-111111111111'])
     expect(first.copiedSessionIds).toEqual(['11111111-1111-4111-8111-111111111111'])
     await expect(readFile(join(targetHome, 'storages', 'session_projcache', 'sessions', 'session-11111111-1111-4111-8111-111111111111.json'), 'utf8')).resolves.toContain('DHS1 yesterday')
-    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', 'session-11111111-1111-4111-8111-111111111111', 'session.jsonl.zstd'), 'utf8')).resolves.toBe('blob-11111111-1111-4111-8111-111111111111')
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', 'session-11111111-1111-4111-8111-111111111111', 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('blob-11111111-1111-4111-8111-111111111111')
     await expect(access(join(targetHome, 'storages', 'session_projcache', 'sessions', 'session-22222222-2222-4222-8222-222222222222.json'))).rejects.toThrow()
     await expect(readFile(source.indexPath, 'utf8')).resolves.toContain('DHS1 yesterday')
 
@@ -96,7 +96,7 @@ describe('mergeLegacyProjectSessions', () => {
     const result = await mergeLegacyProjectSessions({ legacyHome, targetHome, projectCwd: project, backupRoot })
     expect(result.status).toBe('already-merged')
     await expect(readFile(join(targetHome, 'storages', 'session_projcache', 'sessions', `session-${id}.json`), 'utf8')).resolves.toContain('target title')
-    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.jsonl.zstd'), 'utf8')).resolves.toBe('target blob')
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('target blob')
   })
 
   it('returns not-found when the legacy home has no matching project', async () => {
@@ -105,5 +105,36 @@ describe('mergeLegacyProjectSessions', () => {
     const result = await mergeLegacyProjectSessions({ legacyHome, targetHome, projectCwd: 'D:\\vibecoding\\DHS1', backupRoot })
     expect(result.status).toBe('not-found')
     expect(result.sourceSessionIds).toEqual([])
+  })
+
+  it('picks the highest transcript format version inside the session directory', async () => {
+    const { legacyHome, targetHome, backupRoot } = await setup()
+    const project = 'D:\\vibecoding\\DHS1'
+    const id = '55555555-5555-4555-8555-555555555555'
+    const sessionDirectory = join(legacyHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`)
+    await writeSession(legacyHome, id, project, 'DHS1 upgraded', 'superseded')
+    // The runtime keeps the previous transcript beside the bumped one.
+    await writeFile(join(sessionDirectory, 'session.v2.jsonl.zstd'), 'bumped-twice', 'utf8')
+    await writeFile(join(sessionDirectory, 'session.v3.jsonl.zstd'), 'bumped-thrice', 'utf8')
+
+    await mergeLegacyProjectSessions({ legacyHome, targetHome, projectCwd: project, backupRoot })
+
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('bumped-thrice')
+  })
+
+  it('ignores a same-id transcript filed under an unrelated workspace directory', async () => {
+    const { legacyHome, targetHome, backupRoot } = await setup()
+    const project = 'D:\\vibecoding\\DHS1'
+    const id = '66666666-6666-4666-8666-666666666666'
+    await writeSession(legacyHome, id, project, 'DHS1 session', 'DHS1 blob')
+    // Another workspace holds a same-id directory whose transcript carries a
+    // higher format version. Format version is not recency, so it must not win.
+    const foreign = join(legacyHome, 'sessions', '--D-vibecoding-other--', `session-${id}`)
+    await mkdir(foreign, { recursive: true })
+    await writeFile(join(foreign, 'session.v9.jsonl.zstd'), 'foreign blob', 'utf8')
+
+    await mergeLegacyProjectSessions({ legacyHome, targetHome, projectCwd: project, backupRoot })
+
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('DHS1 blob')
   })
 })

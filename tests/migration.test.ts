@@ -152,4 +152,56 @@ describe('legacy DSH migration', () => {
     expect(profile.dependencies).toMatchObject({ 'legacy-plugin': '1.0.0', 'browser-plugin': 'file:C:/plugins/browser' })
     expect(profile.dsh.profile.bundles).toEqual(expect.arrayContaining(['legacy-plugin', 'browser-plugin']))
   })
+
+  it('adopts sessions created in the legacy home after the one-time import', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-migration-sessions-'))
+    const legacyHome = join(root, 'legacy')
+    const targetHome = join(root, 'target')
+    const backupRoot = join(root, 'backups')
+    const legacySessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const desktopSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+    await mkdir(join(legacyHome, 'profiles', 'web'), { recursive: true })
+    await writeFile(join(legacyHome, 'settings.yaml'), 'agent-default-model:\n  model: first\n')
+    await writeFile(join(legacyHome, '.credentials.yaml'), 'providers:\n  legacy: credential\n')
+    const first = await migrateLegacyDsh({ legacyHome, targetHome, backupRoot })
+    expect(first.status).toBe('migrated')
+
+    // Both homes now receive a session; only the legacy-only one may be adopted,
+    // and the desktop copy of the shared id must survive untouched.
+    const transcript = (dshHome: string, id: string, text: string) => writeFile(
+      join(dshHome, 'sessions', '--D-vibecoding-DHS1--', `session-${id}`, 'session.v3.jsonl.zstd'),
+      text,
+    )
+    await mkdir(join(legacyHome, 'sessions', '--D-vibecoding-DHS1--', `session-${legacySessionId}`), { recursive: true })
+    await mkdir(join(legacyHome, 'sessions', '--D-vibecoding-DHS1--', `session-${desktopSessionId}`), { recursive: true })
+    await mkdir(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${desktopSessionId}`), { recursive: true })
+    await transcript(legacyHome, legacySessionId, 'legacy-only')
+    await transcript(legacyHome, desktopSessionId, 'legacy-stale')
+    await transcript(targetHome, desktopSessionId, 'desktop-newer')
+    await mkdir(join(legacyHome, 'storages', 'session_projcache', 'sessions'), { recursive: true })
+    await writeFile(
+      join(legacyHome, 'storages', 'session_projcache', 'sessions', `session-${legacySessionId}.json`),
+      JSON.stringify({ version: 4, record: { identity: { cwd: 'D:\\vibecoding\\DHS1' } } }),
+    )
+    await writeFile(join(legacyHome, 'storages', 'session_projcache.json'), JSON.stringify({
+      unit: { name: 'session_projcache', version: 4 },
+      tables: { sessions: { [`session-${legacySessionId}`]: { record: {} } } },
+    }))
+
+    const second = await migrateLegacyDsh({ legacyHome, targetHome, backupRoot })
+
+    expect(second.status).toBe('synchronized')
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${legacySessionId}`, 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('legacy-only')
+    await expect(readFile(join(targetHome, 'sessions', '--D-vibecoding-DHS1--', `session-${desktopSessionId}`, 'session.v3.jsonl.zstd'), 'utf8')).resolves.toBe('desktop-newer')
+    await expect(access(join(targetHome, 'storages', 'session_projcache', 'sessions', `session-${legacySessionId}.json`))).resolves.toBeUndefined()
+    const aggregate = JSON.parse(await readFile(join(targetHome, 'storages', 'session_projcache.json'), 'utf8')) as { tables: { sessions: Record<string, unknown> } }
+    expect(Object.keys(aggregate.tables.sessions)).toContain(`session-${legacySessionId}`)
+    expect(second.copiedPaths.some(path => path.includes(legacySessionId))).toBe(true)
+    // Credentials must never be touched by the session drain.
+    await expect(readFile(join(targetHome, '.credentials.yaml'), 'utf8')).resolves.toContain('legacy: credential')
+
+    const third = await migrateLegacyDsh({ legacyHome, targetHome, backupRoot })
+    expect(third.status).toBe('already-migrated')
+  })
 })

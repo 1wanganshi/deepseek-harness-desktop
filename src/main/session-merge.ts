@@ -1,5 +1,6 @@
 import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
+import { isTranscriptFileName, transcriptFormatRank } from './session-durability.js'
 
 export interface ProjectSessionMergeOptions {
   legacyHome: string
@@ -25,6 +26,8 @@ export interface ProjectSessionMergeStatus {
 interface SessionSource {
   id: string
   indexPath: string
+  /** Workspace directory (`--D-vibecoding-DHS1--`) the transcript lives under. */
+  workspaceDirectory: string
   blobPath: string | null
 }
 
@@ -56,24 +59,67 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function findSessionBlob(root: string, sessionId: string): Promise<string | null> {
+/**
+ * Locate the transcript for one session, under one DSH home. Only the
+ * `session-<id>` directory inside the session's own workspace directory counts:
+ * sweeping the whole `sessions/` tree and keeping the highest format rank would
+ * let a same-id copy that belongs to a different workspace win, and the merge
+ * would then copy the wrong conversation body.
+ */
+async function findSessionBlob(root: string, sessionId: string, workspaceDirectory: string): Promise<string | null> {
   const sessionsRoot = join(root, 'sessions')
   if (!await exists(sessionsRoot)) return null
-  const expectedDirectory = `session-${sessionId}`.toLowerCase()
   const queue = [sessionsRoot]
+  const expectedRoot = workspaceDirectory.toLowerCase()
+  const expectedDirectory = `session-${sessionId}`.toLowerCase()
+  let best: { path: string; rank: number } | null = null
   while (queue.length > 0) {
     const current = queue.shift() as string
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const path = join(current, entry.name)
       if (!entry.isDirectory()) continue
-      if (entry.name.toLowerCase() === expectedDirectory) {
-        const blob = join(path, 'session.jsonl.zstd')
-        if (await exists(blob)) return blob
+      if (entry.name.toLowerCase() !== expectedRoot) continue
+      // Newer runtimes write `session.vN.jsonl.zstd`; matching only the
+      // untagged name classified those sessions as transcript-less and made
+      // the merge re-copy nothing. Ranks are format versions, not recency, so
+      // the comparison stays inside this one session directory.
+      for (const sessionDirectory of await readdir(path)) {
+        if (sessionDirectory.toLowerCase() !== expectedDirectory) continue
+        for (const candidate of await readdir(join(path, sessionDirectory))) {
+          if (!isTranscriptFileName(candidate)) continue
+          const rank = transcriptFormatRank(candidate)
+          if (best === null || rank > best.rank) best = { path: join(path, sessionDirectory, candidate), rank }
+        }
       }
-      queue.push(path)
     }
   }
-  return null
+  return best?.path ?? null
+}
+
+/**
+ * Derive the on-disk workspace directory name the official runtime uses for a
+ * cwd. Derived from the real directory names:
+ *   D:\vibecoding\DHS1             -> --D-vibecoding-DHS1--
+ *   D:\vibecoding\工作区1           -> --D-vibecoding-~5DE5~4F5C~533A1--
+ *   C:\Users\Lenovo\Desktop\知识库  -> --C-Users-Lenovo-Desktop-~77E5~8BC6~5E93--
+ * Rules: separators become dashes, the drive colon is dropped, and each
+ * non-ASCII character is replaced by `~` plus four uppercase hex digits (no
+ * trailing tilde). Guessing with basename(dirname(cwd)) never matched.
+ */
+function encodeWorkspaceDirectory(cwd: string): string {
+  const normalized = normalizeCwd(cwd)
+  if (normalized === '') return ''
+  const withoutTrailing = normalized.replace(/[\\/]+$/, '')
+  let out = ''
+  for (const character of withoutTrailing) {
+    if (character === '\\' || character === '/') { out += '-'; continue }
+    if (character === ':') continue
+    const code = character.codePointAt(0) as number
+    out += code >= 0x20 && code <= 0x7e
+      ? character
+      : `~${code.toString(16).toUpperCase().padStart(4, '0')}`
+  }
+  return `--${out}--`
 }
 
 async function discoverProjectSessions(root: string, projectCwd: string): Promise<SessionSource[]> {
@@ -86,10 +132,13 @@ async function discoverProjectSessions(root: string, projectCwd: string): Promis
     const indexPath = join(indexRoot, entry.name)
     try {
       const parsed = JSON.parse(await readFile(indexPath, 'utf8')) as unknown
-      if (recordCwd(parsed) === null || normalizeCwd(recordCwd(parsed) as string) !== normalizedProject) continue
+      const cwd = recordCwd(parsed)
+      if (cwd === null) continue
+      const workspaceDirectory = encodeWorkspaceDirectory(cwd)
+      if (normalizeCwd(cwd) !== normalizedProject || workspaceDirectory === '') continue
       const id = basename(entry.name, '.json').replace(/^session-/i, '')
       if (!id) continue
-      result.push({ id, indexPath, blobPath: await findSessionBlob(root, id) })
+      result.push({ id, indexPath, workspaceDirectory, blobPath: await findSessionBlob(root, id, workspaceDirectory) })
     } catch {
       // Ignore unrelated/corrupt index files; the caller still receives the
       // valid DHS1 sessions and the repair report can surface the count.
@@ -303,7 +352,7 @@ export async function mergeLegacyProjectSessions(
     )
     for (const source of sources) {
       const targetIndex = join(targetIndexRoot, `session-${source.id}.json`)
-      const targetBlob = await findSessionBlob(options.targetHome, source.id)
+      const targetBlob = await findSessionBlob(options.targetHome, source.id, source.workspaceDirectory)
       const indexMissing = !await exists(targetIndex)
       const blobMissing = source.blobPath !== null && targetBlob === null
       if (!indexMissing && !blobMissing) {
