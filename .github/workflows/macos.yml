@@ -61,6 +61,15 @@ jobs:
       - name: Patch bundled runtime and add installer script
         run: pnpm run post:pack
 
+      - name: Fill packages electron-builder skipped
+        run: |
+          # electron-builder resolves the manifest graph and drops packages that
+          # only live in the pnpm virtual store, but the runtime imports several
+          # of them dynamically while composing the profile.
+          node scripts/patch-bundled-runtime.mjs
+          APP_PATH=$(ls -d release/mac*/*.app | head -n 1)
+          echo "packaged @deepseek-ai packages: $(ls "$APP_PATH/Contents/Resources/app/node_modules/@deepseek-ai" | wc -l)"
+
       - name: Materialize escaping symlinks in bundle
         run: |
           APP_PATH=$(ls -d release/mac*/*.app | head -n 1)

@@ -71,7 +71,7 @@ export function isTranscriptFileName(name: string): boolean {
  * `session.v2.jsonl.zstd` and `session.v3.jsonl.zstd` at once. Reading the
  * lower rank would rebuild an index from a superseded transcript.
  */
-function transcriptFormatRank(name: string): number {
+export function transcriptFormatRank(name: string): number {
   const match = /^session(?:\.v(\d+))?\.jsonl\.zstd$/i.exec(name)
   if (match === null) return -1
   return match[1] === undefined ? 1 : Number.parseInt(match[1], 10)

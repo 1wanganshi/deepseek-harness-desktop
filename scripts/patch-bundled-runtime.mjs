@@ -105,4 +105,30 @@ for (const [name, info] of best.entries()) {
   console.log(`[patch-bundled-runtime] copied @deepseek-ai/${name}@${info.version}`)
 }
 
-console.log(`[patch-bundled-runtime] done, considered ${best.size} package(s), copied ${copied} missing one(s)`)
+// electron-builder resolves dependencies from the manifest graph and therefore
+// drops packages that only live inside the pnpm virtual store. The runtime
+// imports several of them dynamically while composing the profile, so every
+// stored package must also be present as a real directory.
+let storeCopied = 0
+if (existsSync(pnpmStore)) {
+  for (const dir of readdirSync(pnpmStore)) {
+    const innerScope = join(pnpmStore, dir, 'node_modules', '@deepseek-ai')
+    if (!existsSync(innerScope)) continue
+    let entries
+    try {
+      entries = readdirSync(innerScope)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const target = join(bundledScope, entry)
+      if (existsSync(join(target, 'package.json'))) continue
+      const source = join(innerScope, entry)
+      if (!existsSync(join(source, 'package.json'))) continue
+      cpSync(source, target, { recursive: true })
+      storeCopied += 1
+    }
+  }
+}
+
+console.log(`[patch-bundled-runtime] done, considered ${best.size} package(s), copied ${copied} missing one(s), ${storeCopied} from the store`)
