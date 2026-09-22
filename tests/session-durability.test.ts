@@ -1,9 +1,9 @@
-import { access, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
-import { SessionDurabilityGuard, isSessionDirectoryName, isTranscriptFileName, repairWorkspaceLinks } from '../src/main/session-durability.js'
+import { SessionDurabilityGuard, findUnlinkedSessions, isSessionDirectoryName, isTranscriptFileName, repairWorkspaceLinks } from '../src/main/session-durability.js'
 
 const roots: string[] = []
 const project = 'D:\\vibecoding\\DHS1'
@@ -54,6 +54,49 @@ async function workspaceSessionIds(dshHome: string, workspaceId: string): Promis
 afterEach(async () => {
   const { rm } = await import('node:fs/promises')
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true })
+})
+
+describe('read-only unlinked session scan', () => {
+  it('reports an indexed session no workspace references without touching workspace.json', async () => {
+    const { dshHome } = await setup()
+    await writeWorkspace(dshHome, [{ id: 'dhs1', path: project }])
+    const id = 'aaaa1111-1111-4111-8111-111111111111'
+    await writeCompleteSession(dshHome, id)
+
+    const workspacePath = join(dshHome, 'storages', 'workspace.json')
+    const before = await readFile(workspacePath, 'utf8')
+    const beforeStat = await stat(workspacePath)
+
+    const unlinked = await findUnlinkedSessions(dshHome)
+
+    expect(unlinked).toEqual([id])
+    // The whole point of this function: the sweep runs while the official
+    // runtime holds workspace.json, so it must never write it. A new mtime here
+    // means the shell rewrote the file underneath a live runtime, which is what
+    // killed long conversations.
+    const afterStat = await stat(workspacePath)
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs)
+    expect(await readFile(workspacePath, 'utf8')).toBe(before)
+  })
+
+  it('stays silent for sessions the workspace already links and for unowned cwds', async () => {
+    const { dshHome } = await setup()
+    const linked = 'bbbb2222-2222-4222-8222-222222222222'
+    await writeWorkspace(dshHome, [{ id: 'dhs1', path: project, sessionIds: [`session-${linked}`] }])
+    await writeCompleteSession(dshHome, linked)
+    // No workspace owns this cwd, so linking it would have to invent a
+    // workspace entry — that is a repair, not a scan.
+    await writeCompleteSession(dshHome, 'cccc3333-3333-4333-8333-333333333333', 'D:\\vibecoding\\other')
+
+    await expect(findUnlinkedSessions(dshHome)).resolves.toEqual([])
+  })
+
+  it('returns nothing when there is no workspace document to read', async () => {
+    const { dshHome } = await setup()
+    await writeCompleteSession(dshHome, 'dddd4444-4444-4444-8444-444444444444')
+
+    await expect(findUnlinkedSessions(dshHome)).resolves.toEqual([])
+  })
 })
 
 describe('session durability guard', () => {

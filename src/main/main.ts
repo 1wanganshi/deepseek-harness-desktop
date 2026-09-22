@@ -8,7 +8,7 @@ import { DiagnosticsStore } from './diagnostics.js'
 import { migrateLegacyDsh, type LegacyMigrationStatus } from './migration.js'
 import { ConfigurationDurabilityGuard } from './configuration-durability.js'
 import { mergeLegacyProjectSessions, type ProjectSessionMergeStatus } from './session-merge.js'
-import { SessionDurabilityGuard, recoverMissingSessionIndexes, repairWorkspaceLinks } from './session-durability.js'
+import { SessionDurabilityGuard, findUnlinkedSessions, recoverMissingSessionIndexes, repairWorkspaceLinks } from './session-durability.js'
 import { readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
 import { hasMissingProfileDependencies, prepareOfficialWebProfile } from './profile-preparation.js'
@@ -26,6 +26,14 @@ import { repairVisionCapabilities } from './vision-capability.js'
 import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
 import { resolveMacOsBinDir, startPickerBridge, type PickerBridge } from './picker-bridge.js'
 import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
+import {
+  createHarnessMountRecovery,
+  createRuntimeRestartGate,
+  evaluateHarnessMount,
+  type HarnessMountProbe,
+  type HarnessMountRecovery,
+  type RuntimeRestartGate,
+} from './harness-mount-recovery.js'
 import { repairWindowOptions } from './repair-window.js'
 import { buildStatusPanelMenu } from './status-panel-menu.js'
 import { desktopWebPreferences } from './desktop-web-preferences.js'
@@ -46,6 +54,8 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock()
 let mainWindow: BrowserWindow | null = null
 let harnessView: WebContentsView | null = null
 let harnessLoader: HarnessLoader | null = null
+/** Rebuilt with every window; it reloads the view the window owns. */
+let harnessMount: HarnessMountRecovery
 let runtime: RuntimeController
 let diagnostics: DiagnosticsStore
 let activeRuntime: ResolvedRuntime
@@ -66,9 +76,36 @@ let sessionDurabilitySweepInFlight = false
 let configurationDurability: ConfigurationDurabilityGuard | null = null
 let authenticatedHarnessAdvertisedUrl: string | null = null
 let authenticatedHarnessTargetUrl: string | null = null
-let harnessMountRecoveryAttempts = 0
-let harnessMountRecoveryInFlight = false
+/**
+ * The official page asked for a reload the shell could not complete (its
+ * renderer died, or the load failed). The runtime is still up, so the next
+ * `onState` for a *new* URL must reload instead of assuming the page is fine.
+ * The page itself is never hidden for this: a long transcript is exactly what
+ * makes a renderer die, and hiding the window then would be the visible bug.
+ */
+let harnessViewRecoveryPending = false
+/**
+ * Whether the runtime is currently unable to serve the official page. Kept in
+ * the main process because it changes the reserved strip above the page (so the
+ * user can always reach 维修 / 重启) and is broadcast to the control bar.
+ */
+let harnessAttention = false
 let pickerBridge: PickerBridge | null = null
+/**
+ * Bounds how often the *shell* may restart the runtime. The in-controller
+ * budget (`RuntimeRestartBudget`) already stops a failing runtime from looping;
+ * this gate is the outer backstop for restart requests that come from the
+ * window layer (a renderer that keeps dying with no runtime URL to fall back
+ * on). It re-arms only when a running runtime reports a URL.
+ */
+const runtimeRestartGate: RuntimeRestartGate = createRuntimeRestartGate({
+  maxRestarts: 2,
+  windowMs: 5 * 60 * 1000,
+  restart: () => runtimeRestart(),
+  onLatched: info => {
+    void diagnostics?.log(`运行时在 ${Math.round(info.windowMs / 1000)} 秒内重启 ${info.restartsInWindow} 次，已暂停自动重启以免进入循环；请使用维修窗口检查`)
+  },
+})
 let pickerChildEnv: NodeJS.ProcessEnv | undefined
 let migration: LegacyMigrationStatus = {
   status: 'not-found',
@@ -129,11 +166,10 @@ const APP_USER_MODEL_ID = 'com.deepseek.harness.desktop'
 if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
 
 const STATUS_PANEL_HEIGHT = 76
-const MAX_HARNESS_MOUNT_RECOVERY_ATTEMPTS = 2
-// When collapsed the official Web UI owns the full content area. The status
-// control is available from the native application menu, so no black strip is
-// reserved behind it.
-const STATUS_LAUNCHER_HEIGHT = 0
+// While the runtime is unavailable the collapsed control bar is the only way to
+// reach 维修 / 重启, so a thin strip above the page is reserved for it. The
+// strip is released again as soon as the runtime is serving the page.
+const STATUS_LAUNCHER_HEIGHT = 32
 
 function bundledVersion(appRoot: string): Promise<string> {
   return readInstalledDshVersion(appRoot)
@@ -178,17 +214,38 @@ async function createServices(): Promise<void> {
     log: line => { void log(line) },
     onState: state => {
       sendDesktopEvent('desktop:runtime-state', state)
-      if (state.status === 'running' && state.url !== null) void loadHarness(state.url)
-      if (state.status === 'running') scheduleSessionDurabilitySweep()
+      setHarnessAttention(state.status !== 'running')
+      if (state.status === 'running' && state.url !== null) {
+        // A running runtime that answers is the only proof the restart loop is
+        // over; until this fires the shell may not restart it again.
+        runtimeRestartGate.notifyHealthy()
+        harnessViewRecoveryPending = false
+        scheduleSessionDurabilitySweep()
+        void loadHarness(state.url)
+      }
       if (state.status !== 'running') {
         stopSessionDurabilitySweep()
+      }
+      // The official page stays visible through a transient recovery: hiding it
+      // is what made a few seconds of reconnect look like the whole app
+      // restarting. Only a terminal state gives up the URL (and with it the
+      // view); the repair window and the control bar remain reachable because
+      // the launcher strip keeps the shell above the page.
+      if (state.status === 'error' || state.status === 'stopped') {
         authenticatedHarnessAdvertisedUrl = null
         authenticatedHarnessTargetUrl = null
         harnessLoader?.setDesiredUrl(null)
-        harnessLoader?.clearLoadedUrl()
-        harnessView?.setVisible(false)
       }
     },
+    // The child is confirmed down, so nothing holds DSH_HOME: the only moment
+    // the shell may safely write the session/workspace indexes. While the
+    // runtime is up (or coming up) the sweep is strictly read-only.
+    onStopped: () => { void runIdleWorkspaceLinkRepair() },
+    // Unlike the tiered backoff inside the controller, this is a budget across
+    // *lifecycles*: a session that kills the runtime on load must not be able to
+    // reboot it forever. When it latches, the shell stops restarting and the
+    // control bar asks the user to diagnose, rather than looping.
+    onRestartBlocked: reason => { void log(`已暂停自动重启：${reason}`) },
   })
   sessionDurability = new SessionDurabilityGuard({
     dshHome: paths.dshHome,
@@ -425,12 +482,52 @@ async function startRuntime(): Promise<RuntimeState> {
 }
 
 /**
+ * Restart the runtime through the shared gate. Every automatic restart path
+ * must go through here so the retry budget is respected; an explicit user
+ * action (the repair window) may call `runtime.restart()` directly.
+ */
+async function runtimeRestart(): Promise<void> {
+  await startAfterProfilePreparation(profilePreparation, () => runtime.restart())
+}
+
+/**
+ * Run the workspace link repair, but only when nothing else owns the files.
+ *
+ * `repairWorkspaceLinks` rewrites `storages/workspace.json` with an atomic
+ * replace. The official runtime holds that file for the whole time it is up, so
+ * doing this while it runs makes the runtime reload its workspace state and die
+ * — the desktop shell then restarted it, which the user saw as "typing in an old
+ * chat reboots the app". A long conversation is what makes the collision likely,
+ * because that is when the runtime flushes transcripts and rewrites its own
+ * state files; a new session has nothing to flush.
+ *
+ * So the repair only ever runs while the runtime is confirmed down: before it
+ * starts, right after it stops, and when the whole desktop app is exiting.
+ */
+async function runIdleWorkspaceLinkRepair(): Promise<void> {
+  if (runtimePaths === null) return
+  const status = runtime.getState().status
+  if (status !== 'stopped' && status !== 'error') return
+  try {
+    const linked = await repairWorkspaceLinks(runtimePaths.dshHome, sessionDurabilityBackupRoot())
+    if (linked.length > 0) void diagnostics.log(`已在空闲窗口将 ${linked.length} 个新会话挂回所属工作区`)
+  } catch (error) {
+    void diagnostics.log(`空闲会话挂载失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
  * A session directory can appear on disk while the workspace link that makes it
  * visible in the UI is still missing — the transcript gets flushed lazily, so
  * the two are written at different moments. Linking only at startup and at exit
  * left such a session invisible for the whole run, which is exactly the report
- * "yesterday's session was lost". Re-run the link pass periodically so new
- * transcripts surface within a few minutes instead of after the next restart.
+ * "yesterday's session was lost".
+ *
+ * This pass therefore runs every couple of minutes, but it is strictly
+ * read-only: it reports which sessions are not yet linked and leaves the actual
+ * repair to `runIdleWorkspaceLinkRepair`. Writing `workspace.json` while the
+ * runtime is up is what used to kill a long conversation, so the periodic pass
+ * must never touch it.
  */
 function scheduleSessionDurabilitySweep(): void {
   if (sessionDurabilitySweepTimer !== null || runtimePaths === null) return
@@ -439,14 +536,9 @@ function scheduleSessionDurabilitySweep(): void {
     sessionDurabilitySweepInFlight = true
     void (async () => {
       try {
-        // Repairing workspace links means rewriting both per-session indexes and
-        // `workspace.json`, so never sweep while a restart or an exit check owns
-        // the same files.
-        const state = runtime.getState().status
-        if (state !== 'running' && state !== 'recovering') return
-        const linked = await repairWorkspaceLinks(runtimePaths.dshHome, sessionDurabilityBackupRoot())
-        if (linked.length > 0) {
-          void diagnostics.log(`已自动将 ${linked.length} 个新会话挂回所属工作区`)
+        const unlinked = await findUnlinkedSessions(runtimePaths.dshHome)
+        if (unlinked.length > 0) {
+          void diagnostics.log(`发现 ${unlinked.length} 个会话尚未挂回工作区，将在运行时停止后自动挂载（运行期间不写入 workspace.json）`)
         }
       } catch (error) {
         void diagnostics.log(`会话持久化巡检失败：${error instanceof Error ? error.message : String(error)}`)
@@ -460,6 +552,9 @@ function scheduleSessionDurabilitySweep(): void {
 function stopSessionDurabilitySweep(): void {
   if (sessionDurabilitySweepTimer !== null) clearInterval(sessionDurabilitySweepTimer)
   sessionDurabilitySweepTimer = null
+  // The runtime just left `running`, so this is the first moment the workspace
+  // file is free again.
+  void runIdleWorkspaceLinkRepair()
 }
 
 async function createWindow(): Promise<void> {
@@ -525,22 +620,30 @@ async function createWindow(): Promise<void> {
       })()`, true).then(result => {
         const rawStatus = String(result)
         void diagnostics.log(`官方 Web UI 挂载状态：${rawStatus}`)
+        let probe: HarnessMountProbe
         try {
-          const status = JSON.parse(rawStatus) as { rootChildren?: number; bodyText?: string; bootReady?: boolean }
-          const bodyText = (status.bodyText ?? '').trim()
-          if (bodyText.includes('Failed to load plugins')) {
-            void diagnostics.log(`官方 Web UI 插件加载失败：${bodyText}`)
-            return
-          }
-          if ((status.rootChildren ?? 0) > 0 || status.bootReady === true || bodyText !== '') {
-            harnessMountRecoveryAttempts = 0
-            harnessMountRecoveryInFlight = false
-            return
-          }
-          scheduleHarnessMountRecovery('页面加载完成但未挂载', runtime.getState().url)
+          probe = JSON.parse(rawStatus) as HarnessMountProbe
         } catch (error) {
           void diagnostics.log(`官方 Web UI 挂载状态解析失败：${error instanceof Error ? error.message : String(error)}`)
+          probe = {}
         }
+        const verdict = evaluateHarnessMount(probe)
+        const url = runtime.getState().url
+        if (verdict.state === 'mounted') {
+          // The only signal that clears the retry streak. Static page chrome
+          // ("探索未至之境", the sidebar) is painted before a long transcript is
+          // replayed, so "the document has text" must never count as mounted —
+          // that made the retry ceiling unreachable and the shell kept reloading
+          // the official page under the user while they were typing.
+          harnessMount.markMounted()
+          return
+        }
+        if (verdict.state === 'plugin-failure') {
+          void diagnostics.log(`官方 Web UI 插件加载失败：${verdict.detail}`)
+          harnessMount.schedule('插件加载失败', url)
+          return
+        }
+        harnessMount.schedule('页面加载完成但未挂载', url)
       }).catch(error => {
         void diagnostics.log(`官方 Web UI 挂载检查失败：${error instanceof Error ? error.message : String(error)}`)
       })
@@ -548,21 +651,29 @@ async function createWindow(): Promise<void> {
   })
   harnessView.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     void diagnostics.log(`官方 Web UI 加载失败：code=${errorCode} ${errorDescription} url=${validatedURL} mainFrame=${isMainFrame}`)
-    if (isMainFrame) scheduleHarnessMountRecovery(`加载失败 ${errorCode}`, runtime.getState().url)
+    if (isMainFrame) harnessMount.schedule(`加载失败 ${errorCode}`, runtime.getState().url)
   })
   harnessView.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     void diagnostics.log(`官方 Web UI 控制台：level=${level} ${message} (${sourceId}:${line})`)
   })
   harnessView.webContents.on('render-process-gone', () => {
-    harnessMountRecoveryAttempts = 0
-    harnessMountRecoveryInFlight = false
-    authenticatedHarnessAdvertisedUrl = null
-    authenticatedHarnessTargetUrl = null
+    // A renderer crash (GPU reset, compositor memory pressure, a multi-megabyte
+    // transcript replay) says nothing about the Harness server, which usually
+    // keeps serving. Reload the *page* and leave the runtime alone — restarting
+    // it tore down a healthy process and re-ran the whole boot sequence, which
+    // the user experienced as the app rebooting mid-conversation.
+    void diagnostics.log('官方 Web UI 渲染进程退出，将重新加载官方页面（不重启运行时）')
+    harnessViewRecoveryPending = true
     harnessLoader?.clearLoadedUrl()
-    harnessLoader?.setDesiredUrl(null)
-    harnessView?.setVisible(false)
-    void diagnostics.log('官方 Web UI 渲染进程退出，开始重新连接')
-    void startAfterProfilePreparation(profilePreparation, () => runtime.restart()).catch(() => undefined)
+    const currentUrl = runtime.getState().url
+    if (currentUrl !== null) {
+      harnessMount.schedule('渲染进程已退出', currentUrl)
+      return
+    }
+    // A dying renderer with no known URL is the one case that still needs a
+    // runtime restart, so it goes through the shell-level gate rather than
+    // straight to the controller.
+    void runtimeRestartGate.restart().catch(() => undefined)
   })
 
   const devUrl = process.env.VITE_DEV_SERVER_URL
@@ -578,6 +689,20 @@ async function createWindow(): Promise<void> {
     url => harnessView!.webContents.loadURL(url),
     visible => harnessView?.setVisible(visible),
   )
+  // Bounded page-level retry. Scoped to this window on purpose: closing the
+  // window must discard the counter along with the view it reloads.
+  harnessMount = createHarnessMountRecovery({
+    maxAttempts: 2,
+    retryDelayMs: 700,
+    getCurrentUrl: () => runtime.getState().url,
+    reload: url => { void loadHarness(url) },
+    onRetry: (attempt, reason) => {
+      void diagnostics.log(`官方 Web UI ${reason}，准备第 ${attempt} 次自动重试`)
+    },
+    onAbandoned: reason => {
+      void diagnostics.log(`官方 Web UI 连续挂载失败，已停止自动重试（页面保留，其他会话仍可使用）：${reason}`)
+    },
+  })
   resizeHarnessView()
 }
 
@@ -637,9 +762,11 @@ async function openRepairWindow(): Promise<void> {
 function resizeHarnessView(): void {
   if (mainWindow === null || harnessView === null) return
   const [width, height] = mainWindow.getContentSize()
-  // The official Web UI fills the content area while collapsed. The shell
-  // reserves space only for the fully expanded status bar.
-  const topInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : STATUS_LAUNCHER_HEIGHT
+  // The official Web UI fills the content area while collapsed — except when the
+  // runtime is unavailable, where a thin strip is reserved so the control bar
+  // (and with it 维修 / 重启) stays clickable instead of being covered by the
+  // page. Only the fully expanded status bar reserves more.
+  const topInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : (harnessAttention ? STATUS_LAUNCHER_HEIGHT : 0)
   const bounds = { x: 0, y: topInset, width, height: Math.max(0, height - topInset) }
   harnessView.setBounds(bounds)
   void diagnostics?.log(`状态栏视图边界：${statusPanelExpanded ? '展开' : '隐藏'} y=${bounds.y} h=${bounds.height}`)
@@ -649,9 +776,21 @@ function resizeHarnessView(): void {
   setTimeout(() => {
     if (mainWindow === null || harnessView === null) return
     const [nextWidth, nextHeight] = mainWindow.getContentSize()
-    const nextInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : STATUS_LAUNCHER_HEIGHT
+    const nextInset = statusPanelExpanded ? STATUS_PANEL_HEIGHT : (harnessAttention ? STATUS_LAUNCHER_HEIGHT : 0)
     harnessView.setBounds({ x: 0, y: nextInset, width: nextWidth, height: Math.max(0, nextHeight - nextInset) })
   }, 0)
+}
+
+/**
+ * Whether the official page needs attention. The reserved strip above the page
+ * is what keeps 维修 / 重启 reachable while the runtime is down, so this both
+ * re-lays-out the view and tells the control bar to show its launcher.
+ */
+function setHarnessAttention(next: boolean): void {
+  if (harnessAttention === next) return
+  harnessAttention = next
+  resizeHarnessView()
+  sendDesktopEvent('desktop:harness-attention', next)
 }
 
 function toggleStatusPanelFromMenu(): void {
@@ -814,28 +953,6 @@ async function loadHarness(url: string): Promise<void> {
     harnessView.setVisible(false)
     void diagnostics.log(`官方 Web UI 加载失败，将在恢复后重试：${error instanceof Error ? error.message : String(error)}`)
   }
-}
-
-function scheduleHarnessMountRecovery(reason: string, url: string | null): void {
-  if (url === null || harnessView === null || harnessLoader === null || harnessMountRecoveryInFlight) return
-  if (harnessMountRecoveryAttempts >= MAX_HARNESS_MOUNT_RECOVERY_ATTEMPTS) {
-    void diagnostics.log(`官方 Web UI 连续挂载失败，已停止自动重试：${reason}`)
-    harnessLoader.setDesiredUrl(null)
-    harnessLoader.clearLoadedUrl()
-    harnessView.setVisible(false)
-    return
-  }
-  harnessMountRecoveryAttempts += 1
-  harnessMountRecoveryInFlight = true
-  authenticatedHarnessAdvertisedUrl = null
-  authenticatedHarnessTargetUrl = null
-  harnessLoader.setDesiredUrl(null)
-  harnessLoader.clearLoadedUrl()
-  void diagnostics.log(`官方 Web UI ${reason}，准备第 ${harnessMountRecoveryAttempts} 次自动重试`)
-  setTimeout(() => {
-    harnessMountRecoveryInFlight = false
-    if (runtime.getState().url === url) void loadHarness(url)
-  }, 300)
 }
 
 /**

@@ -14,7 +14,7 @@ describe('diagnostics store', () => {
       userDataPath: root,
       getRuntimeRoot: () => runtimeRoot,
       dshHome,
-      getState: () => ({ status: 'running', version: '0.1.0', port: 3000, url: 'http://127.0.0.1:3000', recoveryAttempt: 0, lastError: null, lastHealthyAt: null }),
+      getState: () => ({ status: 'running', version: '0.1.0', port: 3000, url: 'http://127.0.0.1:3000', recoveryAttempt: 0, lastError: null, lastHealthyAt: null, restartPaused: false, harnessAttention: false }),
     })
 
     runtimeRoot = join(root, 'runtime-new')

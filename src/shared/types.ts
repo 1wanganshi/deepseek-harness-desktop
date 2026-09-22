@@ -12,6 +12,16 @@ export interface RuntimeState {
   recoveryAttempt: number
   lastError: string | null
   lastHealthyAt: string | null
+  /**
+   * Automatic restarts have been paused because the runtime kept dying right
+   * after starting. Only the user can clear this (维修 / 重启桌面端).
+   */
+  restartPaused: boolean
+  /**
+   * The shell wants the user's attention (the runtime is not `running`). Drives
+   * the status launcher and decides whether the official page is left alone.
+   */
+  harnessAttention: boolean
 }
 
 export interface RuntimeDiagnostics {
@@ -80,5 +90,6 @@ export interface DesktopApi {
   restartDesktop: () => Promise<DesktopRestartResult>
   onRuntimeState: (listener: (state: RuntimeState) => void) => () => void
   onStatusPanelExpanded: (listener: (expanded: boolean) => void) => () => void
+  onHarnessAttention: (listener: (attention: boolean) => void) => () => void
   onRepairProgress: (listener: (report: RepairReport) => void) => () => void
 }

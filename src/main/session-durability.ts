@@ -408,6 +408,50 @@ export async function recoverMissingSessionIndexes(dshHome: string): Promise<Rec
   return recovered
 }
 
+/**
+ * Sessions that have a transcript (and an index) on disk but that no workspace
+ * entry references, so the official UI cannot list them.
+ *
+ * This is the read-only half of `repairWorkspaceLinks`, and it exists because
+ * writing `storages/workspace.json` underneath a *running* runtime is what made
+ * a long conversation kill it: the runtime holds that file, reloads its
+ * workspace state when it changes on disk, and dies mid-flush. The shell may
+ * therefore only *observe* while the runtime is up and do the write later, in
+ * an idle window. `workspace.json` is never written here.
+ */
+export async function findUnlinkedSessions(dshHome: string): Promise<string[]> {
+  const workspaceFile = join(dshHome, 'storages', 'workspace.json')
+  if (!await exists(workspaceFile)) return []
+  let document: unknown
+  try {
+    document = JSON.parse(await readFile(workspaceFile, 'utf8')) as unknown
+  } catch {
+    return []
+  }
+  const parts = workspaceTables(document)
+  if (parts === null) return []
+  const unlinked: string[] = []
+  for (const session of (await scanSessions(dshHome)).values()) {
+    if (session.indexPath === null || session.transcriptPath === null) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await readFile(session.indexPath, 'utf8')) as unknown
+    } catch {
+      continue
+    }
+    const cwd = indexCwd(parsed)
+    if (cwd === null) continue
+    const matches = Object.entries(parts.workspaces).filter(([, value]) => workspacePath(value) !== null && normalizePath(workspacePath(value) as string) === normalizePath(cwd))
+    // A missing entry needs a new workspace to be created, which is a repair;
+    // an ambiguous one has no single right answer. Neither is reported here.
+    if (matches.length !== 1) continue
+    const workspace = matches[0][1]
+    if (!isRecord(workspace)) continue
+    if (!workspaceSessionIds(workspace).includes(canonicalSessionKey(session.id))) unlinked.push(session.id)
+  }
+  return unlinked.sort()
+}
+
 /** Attach every indexed session to the sole workspace matching its cwd. */
 export async function repairWorkspaceLinks(dshHome: string, backupRoot: string): Promise<string[]> {
   const workspaceFile = join(dshHome, 'storages', 'workspace.json')

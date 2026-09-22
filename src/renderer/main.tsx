@@ -6,6 +6,7 @@ import { REPAIR_PLAN } from '../shared/repair-plan.js'
 import { repairStatusLabel } from '../shared/repair-progress.js'
 import { createStatusPanelTransition } from './status-panel-transition.js'
 import { shouldAutoStartRepair } from './repair-flow.js'
+import { placeholderMessage, placeholderTitle, shouldShowPlaceholder, shouldShowStatusLauncher } from './status-copy.js'
 import { restartNotice } from '../shared/restart-status.js'
 import './styles.css'
 
@@ -17,6 +18,8 @@ const fallbackState: RuntimeState = {
   recoveryAttempt: 0,
   lastError: null,
   lastHealthyAt: null,
+  restartPaused: false,
+  harnessAttention: false,
 }
 
 const previewDiagnostics: RuntimeDiagnostics = {
@@ -73,6 +76,7 @@ const previewApi: DesktopApi = {
   restartDesktop: async () => ({ restarted: false, report: null }),
   onRuntimeState: () => () => undefined,
   onStatusPanelExpanded: () => () => undefined,
+  onHarnessAttention: () => () => undefined,
   onRepairProgress: () => () => undefined,
 }
 
@@ -97,6 +101,10 @@ function ControlBar(): ReactElement {
   const [desktopVersion, setDesktopVersion] = useState('unknown')
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Mirrors the native panel state: the main process resizes the Harness view to
+  // make room for this bar, so the renderer must follow the same flag the menu
+  // toggles, not its own idea of it.
+  const [panelExpanded, setPanelExpanded] = useState(true)
   const panelTransition = useRef<ReturnType<typeof createStatusPanelTransition> | null>(null)
 
   if (panelTransition.current === null) {
@@ -119,13 +127,18 @@ function ControlBar(): ReactElement {
       setState(snapshot.state)
       setDesktopVersion(snapshot.desktopVersion)
     }).catch(() => setNotice('控制面暂时无法读取运行状态'))
+    void desktopApi.getStatusPanelExpanded().then(setPanelExpanded).catch(() => undefined)
     const unsubscribeRuntime = desktopApi.onRuntimeState(nextState => {
       setState(nextState)
     })
-    const unsubscribePanel = desktopApi.onStatusPanelExpanded(() => undefined)
+    const unsubscribePanel = desktopApi.onStatusPanelExpanded(setPanelExpanded)
+    const unsubscribeAttention = desktopApi.onHarnessAttention(attention => {
+      setState(current => ({ ...current, harnessAttention: attention }))
+    })
     return () => {
       unsubscribeRuntime()
       unsubscribePanel()
+      unsubscribeAttention()
     }
   }, [])
   const runAction = async (key: string, action: () => Promise<unknown>, message: string) => {
@@ -156,6 +169,21 @@ function ControlBar(): ReactElement {
   }
 
   return <>
+    {/*
+     * Collapsed, the bar leaves the screen entirely (the native view covers it)
+     * and this pill is the only way back — and the only visible status. It sits
+     * above the bar in z-order so it stays clickable even while the bar is
+     * revealed underneath it.
+     */}
+    {shouldShowStatusLauncher(state, panelExpanded) && <button
+      type="button"
+      className={`status-launcher${state.harnessAttention ? ' attention' : ''}`}
+      onClick={() => requestExpanded(true)}
+      title="展开状态栏"
+    >
+      <span className={`status-dot ${statusTone(state)}`} />
+      <span className="launcher-label">{statusLabel(state)}</span>
+    </button>}
     {/*
      * The native WebContentsView controls whether this mounted bar is visible:
      * it covers the shell from y=0 while collapsed and starts below the bar
@@ -190,13 +218,11 @@ function ControlBar(): ReactElement {
         <ChevronUp size={17} />
       </button>
     </header>
-    {state.status !== 'running' && <main className="runtime-placeholder">
+    {shouldShowPlaceholder(state) && <main className="runtime-placeholder">
       <div className="runtime-placeholder-card">
         <div className={`placeholder-icon ${statusTone(state)}`}><RefreshCw size={22} className={state.status === 'recovering' || state.status === 'starting' ? 'spin' : ''} /></div>
-        <h1>{statusLabel(state)}</h1>
-        <p>{state.status === 'error'
-          ? '官方 Harness 暂时无法启动。你的模型、凭据和会话仍保存在本机。'
-          : '正在重新建立本机连接，官方页面会在服务恢复后自动打开。'}</p>
+        <h1>{placeholderTitle(state)}</h1>
+        <p>{placeholderMessage(state)}</p>
         {state.lastError && <code>{state.lastError}</code>}
         <div className="placeholder-actions">
           <button className="secondary-button" onClick={() => void runAction('repair-window', () => desktopApi.openRepairWindow(), '维修窗口已打开')} disabled={busy !== null}>

@@ -22,6 +22,11 @@ const api: DesktopApi = {
     ipcRenderer.on('desktop:status-panel-expanded', callback)
     return () => ipcRenderer.removeListener('desktop:status-panel-expanded', callback)
   },
+  onHarnessAttention: (listener) => {
+    const callback = (_event: Electron.IpcRendererEvent, attention: boolean) => listener(attention)
+    ipcRenderer.on('desktop:harness-attention', callback)
+    return () => ipcRenderer.removeListener('desktop:harness-attention', callback)
+  },
   onRepairProgress: (listener) => {
     const callback = (_event: Electron.IpcRendererEvent, report: RepairReport) => listener(report)
     ipcRenderer.on('desktop:repair-progress', callback)
