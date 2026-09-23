@@ -23,7 +23,7 @@ import { buildRestartHelperArgs, restartDesktop, shutdownDesktop, shouldProceedW
 import { repairBundledDependencies } from './bundled-dependencies.js'
 import { repairOpenAiProviderCompatibility } from './provider-compatibility.js'
 import { repairVisionCapabilities } from './vision-capability.js'
-import { shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
+import { ensureMainWindowIsNotTopmost, shouldHideOnClose, shouldHideOnMinimize } from './desktop-shell.js'
 import { resolveMacOsBinDir, startPickerBridge, type PickerBridge } from './picker-bridge.js'
 import { createHarnessLoader, type HarnessLoader } from './harness-loader.js'
 import {
@@ -593,7 +593,10 @@ async function createWindow(): Promise<void> {
       ...desktopWebPreferences(fileURLToPath(new URL('../preload.js', import.meta.url))),
     },
   })
-  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.once('ready-to-show', () => {
+    ensureMainWindowIsNotTopmost(mainWindow)
+    mainWindow?.show()
+  })
   mainWindow.on('minimize', () => {
     if (!shouldHideOnMinimize(process.platform)) return
     hideMainWindow()
@@ -823,9 +826,20 @@ function toggleStatusPanelFromMenu(): void {
   sendDesktopEvent('desktop:status-panel-expanded', statusPanelExpanded)
 }
 
+/**
+ * Keep the main window a normal, non-topmost window.
+ *
+ * Nothing in this shell asks for an always-on-top window, but the flag is a
+ * persistent Win32 window style: once some other process sets `WS_EX_TOPMOST`
+ * on our HWND (an automation helper calling `SetWindowPos(HWND_TOPMOST)` is
+ * enough), it sticks for the lifetime of the window and the app appears to sit
+ * above every other application. Re-assert the normal state whenever the window
+ * is shown so it can never get stuck on top.
+ */
 function showMainWindow(): void {
   if (mainWindow === null || mainWindow.isDestroyed()) return
   if (mainWindow.isMinimized()) mainWindow.restore()
+  ensureMainWindowIsNotTopmost(mainWindow)
   mainWindow.show()
   mainWindow.focus()
 }
