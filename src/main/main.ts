@@ -11,7 +11,7 @@ import { mergeLegacyProjectSessions, type ProjectSessionMergeStatus } from './se
 import { SessionDurabilityGuard, findUnlinkedSessions, recoverMissingSessionIndexes, repairWorkspaceLinks } from './session-durability.js'
 import { readInstalledDshVersion } from './official-updates.js'
 import { isLocalUrl } from './ports.js'
-import { hasMissingProfileDependencies, prepareOfficialWebProfile } from './profile-preparation.js'
+import { hasMissingProfileDependencies, prepareOfficialWebProfile, pruneUnresolvableBundles } from './profile-preparation.js'
 import { ensureVisionRouterCompatibility, synchronizeInstalledClientStoreCompatibility } from './compatibility.js'
 import { mitigateIncompatibleTaskBoard, normalizeProfilePatchFile, migratePersonaPresetSchema } from './incompatible-plugins.js'
 import { RuntimeController } from './runtime-controller.js'
@@ -400,6 +400,19 @@ async function prepareWebProfile(options: {
   if (patchNormalization.changed) {
     void diagnostics.log('启动预检已将 Web profile patch 修复为合法数组格式')
   }
+  // A bundle whose package is missing aborts the whole Harness boot. Heal that
+  // before the dependency install runs, so a half-finished plugin install
+  // disables just that plugin instead of leaving the app unable to start.
+  try {
+    const pruned = await pruneUnresolvableBundles(profilePath)
+    if (pruned.changed) {
+      void diagnostics.log(`启动预检移除了 ${pruned.pruned.length} 个无法解析的插件（${pruned.pruned.join(', ')}），备份：${pruned.backupPath}`)
+    }
+  } catch (error) {
+    // Healing is best-effort: a failure here must not become a new way to block
+    // startup. The install attempt below still runs and reports its own errors.
+    void diagnostics.log(`启动预检清理无效插件失败：${error instanceof Error ? error.message : String(error)}`)
+  }
   try {
     const lockfile = join(profilePath, 'pnpm-lock.yaml')
     const compatibilityPackagePath = join(profileNodeModules, '@deepseek-ai', 'dsh-client-store', 'package.json')
@@ -452,11 +465,21 @@ async function prepareWebProfile(options: {
     if (stillMissing.length === 0 && existsSync(profileNodeModules)) {
       void diagnostics.log(`插件依赖重建未完成（${detail}），但已安装的依赖完整，继续启动`)
     } else {
-      // Never launch Harness against a partially rebuilt profile. Keeping the
-      // rejection lets the startup gate show the real failure and leaves the
-      // existing profile backup available for the repair flow.
-      void diagnostics.log(`插件兼容层或依赖重建失败，已阻止启动：${detail}`)
-      throw error
+      // The install failed and some dependency is genuinely absent. Rather than
+      // refuse to boot — which leaves the user with an app that can never reach
+      // the runtime — prune the bundles that cannot resolve and start with the
+      // rest. Only a profile that is still broken after pruning is fatal.
+      const pruned = await pruneUnresolvableBundles(profilePath).catch(() => ({ changed: false, pruned: [], backupPath: null }))
+      const remaining = await hasMissingProfileDependencies(profilePath).catch(() => stillMissing)
+      if (pruned.changed && remaining.length === 0) {
+        void diagnostics.log(`插件依赖重建失败（${detail}），已移除无法解析的插件并继续启动：${pruned.pruned.join(', ')}；备份：${pruned.backupPath}`)
+      } else {
+        // Never launch Harness against a partially rebuilt profile. Keeping the
+        // rejection lets the startup gate show the real failure and leaves the
+        // existing profile backup available for the repair flow.
+        void diagnostics.log(`插件兼容层或依赖重建失败，已阻止启动：${detail}`)
+        throw error
+      }
     }
   }
 }

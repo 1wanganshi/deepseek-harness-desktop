@@ -74,6 +74,29 @@ async function readYaml(path: string): Promise<unknown> {
   return YAML.parse(await readFile(path, 'utf8')) ?? {}
 }
 
+/**
+ * DSH requires `cordis.patch.yml` to be a top-level YAML array. A file holding
+ * only comments (or a single mapping) makes every boot fail with
+ * "overlay ... must be a top-level YAML array of loader patch entries".
+ *
+ * The snapshot must never capture such a file: because `protect()` restores the
+ * snapshot on every boot, one corrupt capture turns into a permanent boot
+ * failure that even a repair flow cannot clear — the shell fixes the live file,
+ * then immediately overwrites it with the poisoned snapshot again.
+ */
+function isValidProfilePatch(value: unknown): boolean {
+  return Array.isArray(value)
+}
+
+async function readProfilePatch(path: string): Promise<unknown[] | null> {
+  try {
+    const parsed = YAML.parse(await readFile(path, 'utf8'))
+    return isValidProfilePatch(parsed) ? parsed as unknown[] : null
+  } catch {
+    return null
+  }
+}
+
 async function readJson(path: string): Promise<RecordValue> {
   return JSON.parse(await readFile(path, 'utf8')) as RecordValue
 }
@@ -134,8 +157,25 @@ export class ConfigurationDurabilityGuard {
       }
     }
 
+    // Heal a corrupt overlay in both directions. A snapshot captured before
+    // this guard existed still holds the invalid file, so repairing only the
+    // live copy would be undone on the next boot.
+    await this.repairProfilePatch()
+    await this.repairProfilePatch(join(this.snapshotPath, 'profiles', 'web', 'cordis.patch.yml'))
+
     await this.captureCurrentConfiguration()
     return { captured: true, restored, snapshotPath: this.snapshotPath }
+  }
+
+  /** Rewrite an invalid `cordis.patch.yml` to an empty, bootable array. */
+  private async repairProfilePatch(path = join(this.dshHome, 'profiles', 'web', 'cordis.patch.yml')): Promise<void> {
+    if (!await exists(path)) return
+    if (await readProfilePatch(path) !== null) return
+    const raw = await readFile(path, 'utf8').catch(() => '')
+    // Keep the user's bytes: a comment-only file may still hold intent, and the
+    // repair flow can surface it if the overlay was meant to do something.
+    await writeAtomically(`${path}.invalid-${Date.now()}.bak`, raw).catch(() => undefined)
+    await writeAtomically(path, '[]\n')
   }
 
   private async captureCurrentConfiguration(): Promise<void> {
@@ -148,6 +188,13 @@ export class ConfigurationDurabilityGuard {
     ]) {
       const source = join(this.dshHome, relativePath)
       if (!await exists(source)) continue
+      // Never snapshot a patch overlay DSH cannot boot with. Capturing it would
+      // freeze the corruption into the "last known good" copy that `protect()`
+      // restores on every start.
+      if (relativePath.endsWith('cordis.patch.yml')) {
+        const patch = await readProfilePatch(source)
+        if (patch === null) continue
+      }
       const target = join(this.snapshotPath, relativePath)
       await mkdir(dirname(target), { recursive: true })
       await cp(source, target, { force: true })

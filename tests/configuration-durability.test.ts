@@ -70,6 +70,68 @@ describe('configuration durability guard', () => {
     expect(manifest.dsh.profile.bundles).toEqual(expect.arrayContaining(['desktop-plugin', 'original-plugin']))
     await expect(access(report.snapshotPath)).resolves.toBeUndefined()
   })
+
+  /**
+   * `protect()` restores its snapshot on every boot, so a snapshot holding an
+   * invalid patch overlay turns one bad write into a permanent boot failure:
+   * DSH aborts with "overlay ... must be a top-level YAML array", the shell
+   * normalizes the live file, and the next start overwrites the fix with the
+   * poisoned snapshot again.
+   */
+  it('never captures a patch overlay DSH cannot boot with', async () => {
+    const root = await mkdirTemp('dsh-configuration-durability-patch-')
+    const dshHome = join(root, 'dsh-home')
+    const profile = join(dshHome, 'profiles', 'web')
+    const backupRoot = join(root, 'backups')
+    await mkdir(profile, { recursive: true })
+    // A comment-only file parses to null, not to a top-level array.
+    await writeFile(join(profile, 'cordis.patch.yml'), '# reload probe\n')
+
+    const guard = new ConfigurationDurabilityGuard({ dshHome, backupRoot })
+    await guard.protect()
+
+    // The live file is healed first, so whatever reaches the snapshot is a
+    // bootable array — never the comment-only original.
+    const snapshotPatch = join(backupRoot, 'current', 'profiles', 'web', 'cordis.patch.yml')
+    const captured = await readFile(snapshotPatch, 'utf8')
+    expect(YAML.parse(captured)).toEqual([])
+  })
+
+  it('repairs an invalid live patch file and its poisoned snapshot', async () => {
+    const root = await mkdirTemp('dsh-configuration-durability-repair-')
+    const dshHome = join(root, 'dsh-home')
+    const profile = join(dshHome, 'profiles', 'web')
+    const backupRoot = join(root, 'backups')
+    await mkdir(profile, { recursive: true })
+    await writeFile(join(profile, 'cordis.patch.yml'), '# reload probe\n')
+    // A snapshot written before the capture guard existed still holds the
+    // invalid overlay and must be healed too.
+    const snapshotProfile = join(backupRoot, 'current', 'profiles', 'web')
+    await mkdir(snapshotProfile, { recursive: true })
+    await writeFile(join(snapshotProfile, 'cordis.patch.yml'), '# reload probe\n')
+
+    const guard = new ConfigurationDurabilityGuard({ dshHome, backupRoot })
+    await guard.protect()
+
+    await expect(readFile(join(profile, 'cordis.patch.yml'), 'utf8')).resolves.toBe('[]\n')
+    await expect(readFile(join(snapshotProfile, 'cordis.patch.yml'), 'utf8')).resolves.toBe('[]\n')
+  })
+
+  it('leaves a valid patch overlay untouched', async () => {
+    const root = await mkdirTemp('dsh-configuration-durability-valid-')
+    const dshHome = join(root, 'dsh-home')
+    const profile = join(dshHome, 'profiles', 'web')
+    const backupRoot = join(root, 'backups')
+    await mkdir(profile, { recursive: true })
+    const overlay = '- id: web-ui-task-board\n  disabled: true\n'
+    await writeFile(join(profile, 'cordis.patch.yml'), overlay)
+
+    const guard = new ConfigurationDurabilityGuard({ dshHome, backupRoot })
+    await guard.protect()
+
+    await expect(readFile(join(profile, 'cordis.patch.yml'), 'utf8')).resolves.toBe(overlay)
+    await expect(readFile(join(backupRoot, 'current', 'profiles', 'web', 'cordis.patch.yml'), 'utf8')).resolves.toBe(overlay)
+  })
 })
 
 async function mkdirTemp(prefix: string): Promise<string> {
