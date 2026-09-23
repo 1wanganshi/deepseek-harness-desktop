@@ -11,6 +11,25 @@ const HEALTH_TIMEOUT_MS = 30_000
 const HEALTH_POLL_MS = 250
 const ADVERTISED_URL_TIMEOUT_MS = 5_000
 const CHILD_SHUTDOWN_GRACE_MS = 4_000
+/**
+ * Heartbeat probe timeout.
+ *
+ * The Harness is a single-threaded Node process: while it decompresses and
+ * replays a multi-megabyte session transcript the event loop is blocked and it
+ * cannot answer `/` at all. A short timeout therefore turns "busy loading a
+ * long conversation" into "unhealthy" and the shell kills a perfectly good
+ * runtime — the user sees the app reboot the moment they send a message to an
+ * old session, and the restarted runtime no longer has the conversation in
+ * memory. Keep this generous; a genuinely dead child is caught by the `exit`
+ * event, not by this probe.
+ */
+const HEARTBEAT_TIMEOUT_MS = 20_000
+/**
+ * Consecutive probe failures before the shell even *considers* a restart.
+ * Paired with `HEARTBEAT_TIMEOUT_MS` this means a runtime must be silent for
+ * over a minute before it is treated as unhealthy.
+ */
+const HEARTBEAT_FAILURE_LIMIT = 4
 /** Timeout for the post-start proof probe (`proveHealthy`). */
 const PROOF_TIMEOUT_MS = 2_000
 
@@ -351,7 +370,7 @@ export class RuntimeController {
     this.fetchImpl = options.fetchImpl ?? fetch
     this.sleep = options.sleep ?? wait
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 4_000
-    this.heartbeatFailureLimit = options.heartbeatFailureLimit ?? 4
+    this.heartbeatFailureLimit = options.heartbeatFailureLimit ?? HEARTBEAT_FAILURE_LIMIT
     this.restartBudget = options.restartBudget ?? new RuntimeRestartBudget()
   }
 
@@ -582,7 +601,7 @@ export class RuntimeController {
   private async checkHeartbeat(port: number): Promise<void> {
     if (this.stoppedByUser || this.recovering || this.state.status !== 'running') return
     try {
-      const response = await this.fetchImpl(`http://127.0.0.1:${port}/`, { redirect: 'manual', signal: AbortSignal.timeout(2_000) })
+      const response = await this.fetchImpl(`http://127.0.0.1:${port}/`, { redirect: 'manual', signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS) })
       if (isHealthyHarnessResponse(response)) {
         this.heartbeatFailures = 0
         this.heartbeatSuccesses += 1
@@ -594,13 +613,30 @@ export class RuntimeController {
         return
       }
     } catch {
-      // Count consecutive probe failures before restarting to avoid reacting to one transient packet loss.
+      // A timeout while the runtime replays a long transcript is expected and is
+      // *not* evidence of death; the child-liveness check below decides.
     }
     this.heartbeatSuccesses = 0
     this.heartbeatFailures += 1
-    if (this.heartbeatFailures >= this.heartbeatFailureLimit) {
-      await this.recoverFromHealthFailure(`Harness 连续 ${this.heartbeatFailures} 次健康检查失败`)
+    if (this.heartbeatFailures < this.heartbeatFailureLimit) return
+    // The probe budget is spent, but a probe failure is not proof of death: the
+    // Harness is single-threaded and blocks its event loop while it replays a
+    // multi-megabyte transcript, so "cannot answer `/`" is exactly what a
+    // healthy runtime looks like mid-load. A child that has not exited is
+    // therefore left alone — its own `exit` event is the authoritative signal
+    // that it is gone. Killing it here is what made the app reboot the instant
+    // a user sent a message to a long conversation.
+    if (this.childIsAlive()) {
+      this.heartbeatFailures = 0
+      return
     }
+    await this.recoverFromHealthFailure(`Harness 连续 ${this.heartbeatFailures} 次健康检查失败`)
+  }
+
+  /** True while the tracked child process has not reported an exit. */
+  private childIsAlive(): boolean {
+    const child = this.child
+    return child !== null && child.exitCode === null && !child.killed
   }
 
   private async recoverFromHealthFailure(reason: string): Promise<void> {
