@@ -35,6 +35,7 @@ import {
   type RuntimeRestartGate,
 } from './harness-mount-recovery.js'
 import { repairWindowOptions } from './repair-window.js'
+import { createRendererUnresponsiveRecovery, type RendererUnresponsiveRecovery } from './renderer-unresponsive-recovery.js'
 import { buildStatusPanelMenu } from './status-panel-menu.js'
 import { desktopWebPreferences } from './desktop-web-preferences.js'
 import type { RepairCheck, RepairCheckStatus, RepairReport, RuntimeDiagnostics, RuntimeState } from '../shared/types.js'
@@ -56,6 +57,12 @@ let harnessView: WebContentsView | null = null
 let harnessLoader: HarnessLoader | null = null
 /** Rebuilt with every window; it reloads the view the window owns. */
 let harnessMount: HarnessMountRecovery
+/**
+ * Guards reloads of a renderer that stopped answering. A wedged client plugin
+ * (a synchronous loop in the page) freezes the UI without crashing it, so this
+ * is the only signal the shell gets.
+ */
+let rendererRecovery: RendererUnresponsiveRecovery
 let runtime: RuntimeController
 let diagnostics: DiagnosticsStore
 let activeRuntime: ResolvedRuntime
@@ -701,6 +708,33 @@ async function createWindow(): Promise<void> {
     // straight to the controller.
     void runtimeRestartGate.restart().catch(() => undefined)
   })
+  // A page that stops answering is wedged, not dead: `render-process-gone` and
+  // `did-fail-load` never fire, so without this the user had to restart the whole
+  // app. Reloading the view is the cure — the conversation lives in the runtime,
+  // so only the render is lost.
+  harnessView.webContents.on('unresponsive', () => {
+    const currentUrl = runtime.getState().url
+    void diagnostics.log(`官方 Web UI 渲染进程无响应，尝试重新加载页面（不重启运行时）：${currentUrl ?? '未知地址'}`)
+    if (!rendererRecovery.recover()) {
+      void diagnostics.log('官方 Web UI 渲染进程反复无响应，已暂停自动重载；会话与运行时仍在运行，可通过「重启」恢复')
+      return
+    }
+    harnessViewRecoveryPending = true
+    harnessLoader?.clearLoadedUrl()
+    if (currentUrl !== null) {
+      // Reload the view directly rather than through `harnessMount`: that budget
+      // belongs to a page that never mounted, and an unresponsive reload is a
+      // different failure that must not consume it.
+      void loadHarness(currentUrl)
+      return
+    }
+    void runtimeRestartGate.restart().catch(() => undefined)
+  })
+  harnessView.webContents.on('responsive', () => {
+    // The renderer answered again, so a reload is no longer needed and the
+    // budget refills for the next genuine wedge.
+    rendererRecovery.markResponsive()
+  })
 
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await mainWindow.loadURL(devUrl)
@@ -727,6 +761,20 @@ async function createWindow(): Promise<void> {
     },
     onAbandoned: reason => {
       void diagnostics.log(`官方 Web UI 连续挂载失败，已停止自动重试（页面保留，其他会话仍可使用）：${reason}`)
+    },
+  })
+  // Separate budget from the mount retry above: reloading a wedged renderer is a
+  // routine remedy and must not consume the retries that a never-mounted page
+  // needs. Five reloads in ten minutes tolerates a plugin that wedges on open
+  // while still refusing to reload forever.
+  rendererRecovery = createRendererUnresponsiveRecovery({
+    maxReloads: 5,
+    windowMs: 10 * 60_000,
+    onReload: ({ attempt }) => {
+      void diagnostics.log(`官方 Web UI 第 ${attempt} 次因无响应而重新加载页面`)
+    },
+    onLatched: () => {
+      void diagnostics.log('官方 Web UI 反复无响应，已暂停自动重载（运行时保持运行，可用「重启」手动恢复）')
     },
   })
   resizeHarnessView()
