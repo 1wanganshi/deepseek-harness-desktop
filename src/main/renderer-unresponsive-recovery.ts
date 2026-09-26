@@ -52,6 +52,41 @@ export interface RendererUnresponsiveRecovery {
   latched(): boolean
 }
 
+/**
+ * Pings the page and reports whether it answered inside `timeoutMs`.
+ *
+ * `webContents.executeJavaScript` resolves only once the renderer has run the
+ * script, so a page stuck in a synchronous loop never resolves it. That makes
+ * this the one dependable liveness signal: Electron's own `unresponsive` event
+ * did **not** fire for the `@dickpy/dsh-imagegen` wedge, which was measured
+ * pegging a renderer at 100% CPU for over a minute with zero events delivered.
+ * The call itself is injectable so tests never wait on wall-clock time.
+ */
+export interface RendererPingOptions {
+  timeoutMs: number
+  ping: () => Promise<unknown>
+  setTimeoutImpl?: (callback: () => void, delayMs: number) => unknown
+  clearTimeoutImpl?: (handle: unknown) => void
+}
+
+/**
+ * Resolves true when the page answered within the timeout, false when it did
+ * not. Never rejects: a rejected ping (a gone renderer) is simply "not alive",
+ * and the crash handler already covers that case.
+ */
+export async function pingRenderer(options: RendererPingOptions): Promise<boolean> {
+  const scheduleTimeout = options.setTimeoutImpl ?? ((callback, delayMs) => setTimeout(callback, delayMs))
+  const cancelTimeout = options.clearTimeoutImpl ?? ((handle) => { clearTimeout(handle as NodeJS.Timeout) })
+  let timer: unknown
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = scheduleTimeout(() => resolve(false), options.timeoutMs)
+  })
+  const answered = options.ping().then(() => true).catch(() => false)
+  const result = await Promise.race([answered, timeout])
+  cancelTimeout(timer)
+  return result
+}
+
 export function createRendererUnresponsiveRecovery(
   options: RendererUnresponsiveRecoveryOptions,
 ): RendererUnresponsiveRecovery {

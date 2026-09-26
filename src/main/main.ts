@@ -35,7 +35,7 @@ import {
   type RuntimeRestartGate,
 } from './harness-mount-recovery.js'
 import { repairWindowOptions } from './repair-window.js'
-import { createRendererUnresponsiveRecovery, type RendererUnresponsiveRecovery } from './renderer-unresponsive-recovery.js'
+import { createRendererUnresponsiveRecovery, pingRenderer, type RendererUnresponsiveRecovery } from './renderer-unresponsive-recovery.js'
 import { buildStatusPanelMenu } from './status-panel-menu.js'
 import { desktopWebPreferences } from './desktop-web-preferences.js'
 import type { RepairCheck, RepairCheckStatus, RepairReport, RuntimeDiagnostics, RuntimeState } from '../shared/types.js'
@@ -91,6 +91,8 @@ let authenticatedHarnessTargetUrl: string | null = null
  * makes a renderer die, and hiding the window then would be the visible bug.
  */
 let harnessViewRecoveryPending = false
+/** Main-process liveness watchdog for the official page; rebuilt with the window. */
+let harnessWatchdog: NodeJS.Timeout | null = null
 /**
  * Whether the runtime is currently unable to serve the official page. Kept in
  * the main process because it changes the reserved strip above the page (so the
@@ -177,6 +179,18 @@ const STATUS_PANEL_HEIGHT = 76
 // reach 维修 / 重启, so a thin strip above the page is reserved for it. The
 // strip is released again as soon as the runtime is serving the page.
 const STATUS_LAUNCHER_HEIGHT = 32
+/**
+ * Renderer liveness watchdog.
+ *
+ * Electron's `unresponsive` event did not fire for the observed plugin wedge
+ * (a renderer pegged at 100% CPU for over a minute with no event delivered), so
+ * the shell probes the page itself. `executeJavaScript` resolves only once the
+ * renderer has run the script, so a missed response inside the timeout is the
+ * wedge signal. The timeout is generous so a page busy replaying a long
+ * transcript is never mistaken for a wedged one.
+ */
+const RENDERER_PING_INTERVAL_MS = 5_000
+const RENDERER_PING_TIMEOUT_MS = 15_000
 
 function bundledVersion(appRoot: string): Promise<string> {
   return readInstalledDshVersion(appRoot)
@@ -616,6 +630,10 @@ async function createWindow(): Promise<void> {
   mainWindow.on('resize', () => resizeHarnessView())
   mainWindow.on('closed', () => {
     if (repairWindow !== null && !repairWindow.isDestroyed()) repairWindow.close()
+    if (harnessWatchdog !== null) {
+      clearInterval(harnessWatchdog)
+      harnessWatchdog = null
+    }
     mainWindow = null
     harnessView = null
     harnessLoader = null
@@ -720,7 +738,13 @@ async function createWindow(): Promise<void> {
   // A page that stops answering is wedged, not dead: `render-process-gone` and
   // `did-fail-load` never fire, so without this the user had to restart the whole
   // app. The conversation lives in the runtime, so only the render is lost.
-  harnessView.webContents.on('unresponsive', () => {
+  //
+  // Electron's own `unresponsive` event is NOT reliable here: for the observed
+  // plugin wedge it never fired, even with the renderer pegged at 100% CPU for
+  // over a minute. So the shell runs its own watchdog — pinging the page with
+  // `executeJavaScript`, which only resolves once the renderer has actually run
+  // it — and treats a missed response as the signal.
+  const rebuildWedgedRenderer = (): void => {
     void diagnostics.log('官方 Web UI 渲染进程无响应，将重建渲染进程（不重启运行时）')
     if (!rendererRecovery.recover()) {
       void diagnostics.log('官方 Web UI 渲染进程反复无响应，已暂停自动重建；会话与运行时仍在运行，可通过「重启」恢复')
@@ -736,12 +760,30 @@ async function createWindow(): Promise<void> {
     if (harnessView !== null && !harnessView.webContents.isDestroyed()) {
       harnessView.webContents.forcefullyCrashRenderer()
     }
-  })
+  }
+  harnessView.webContents.on('unresponsive', rebuildWedgedRenderer)
   harnessView.webContents.on('responsive', () => {
-    // The renderer answered again, so a reload is no longer needed and the
+    // The renderer answered again, so a rebuild is no longer needed and the
     // budget refills for the next genuine wedge.
     rendererRecovery.markResponsive()
   })
+  if (harnessWatchdog !== null) clearInterval(harnessWatchdog)
+  harnessWatchdog = setInterval(() => {
+    if (harnessView === null || harnessView.webContents.isDestroyed()) return
+    // Only ever judge a page that is meant to be live: during the initial load a
+    // miss is expected, not evidence of a wedge.
+    const state = runtime.getState()
+    if (state.status !== 'running' || state.url === null) return
+    if (harnessViewRecoveryPending) return
+    void pingRenderer({
+      timeoutMs: RENDERER_PING_TIMEOUT_MS,
+      ping: () => harnessView!.webContents.executeJavaScript('1'),
+    }).then(alive => {
+      if (alive) return
+      if (harnessView === null || harnessView.webContents.isDestroyed()) return
+      rebuildWedgedRenderer()
+    }).catch(() => undefined)
+  }, RENDERER_PING_INTERVAL_MS)
 
   const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl !== undefined) await mainWindow.loadURL(devUrl)

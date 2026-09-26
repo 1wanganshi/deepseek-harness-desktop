@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createRendererUnresponsiveRecovery } from '../src/main/renderer-unresponsive-recovery.js'
+import { createRendererUnresponsiveRecovery, pingRenderer } from '../src/main/renderer-unresponsive-recovery.js'
 
 /**
  * A client plugin can wedge the renderer in a synchronous loop (the
@@ -75,5 +75,28 @@ describe('renderer unresponsive recovery', () => {
 
     guard.rebuildScheduled()
     expect(guard.rebuildInFlight()).toBe(false)
+  })
+})
+
+/**
+ * Electron's `unresponsive` event did NOT fire for the observed plugin wedge
+ * (renderer pegged at 100% CPU for over a minute, zero events delivered), so the
+ * shell detects the freeze itself. `executeJavaScript` resolves only once the
+ * renderer has run the script, which makes a missed response the wedge signal.
+ */
+describe('renderer liveness ping', () => {
+  it('reports alive when the page answers', async () => {
+    await expect(pingRenderer({ timeoutMs: 1000, ping: async () => 1 })).resolves.toBe(true)
+  })
+
+  it('reports not alive when the page never answers', async () => {
+    // A wedged renderer never settles the promise.
+    await expect(pingRenderer({ timeoutMs: 10, ping: () => new Promise(() => {}) })).resolves.toBe(false)
+  })
+
+  it('treats a failed ping as not alive rather than throwing', async () => {
+    // A gone renderer rejects; the crash handler owns that path, so the watchdog
+    // must simply not double-handle it.
+    await expect(pingRenderer({ timeoutMs: 1000, ping: async () => { throw new Error('gone') } })).resolves.toBe(false)
   })
 })
