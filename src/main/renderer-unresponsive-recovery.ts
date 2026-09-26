@@ -35,10 +35,18 @@ export interface RendererUnresponsiveRecoveryOptions {
 
 export interface RendererUnresponsiveRecovery {
   /**
-   * The renderer stopped answering. Returns true when a reload was requested,
+   * The renderer stopped answering. Returns true when a rebuild was requested,
    * false when the budget is spent or the guard has latched.
    */
   recover(): boolean
+  /**
+   * True once `recover()` asked for a rebuild but the resulting
+   * `render-process-gone` has not been handled yet. Lets the crash handler tell
+   * a deliberate teardown from an unrelated crash.
+   */
+  rebuildInFlight(): boolean
+  /** The deliberate teardown has been observed and the page load started. */
+  rebuildScheduled(): void
   /** The renderer answered again; drop the latch and refill the budget. */
   markResponsive(): void
   latched(): boolean
@@ -51,6 +59,7 @@ export function createRendererUnresponsiveRecovery(
   let windowStartedAt: number | null = null
   let reloadsInWindow = 0
   let latched = false
+  let pendingRebuild = false
 
   return {
     recover() {
@@ -73,14 +82,26 @@ export function createRendererUnresponsiveRecovery(
         return false
       }
       reloadsInWindow += 1
+      pendingRebuild = true
       options.onReload?.({ attempt: reloadsInWindow, reloadsInWindow })
       return true
+    },
+
+    rebuildInFlight() {
+      return pendingRebuild
+    },
+
+    rebuildScheduled() {
+      pendingRebuild = false
     },
 
     markResponsive() {
       latched = false
       windowStartedAt = null
       reloadsInWindow = 0
+      // `pendingRebuild` is deliberately NOT cleared here: a renderer can answer
+      // one probe and then wedge again before the teardown lands, and the crash
+      // handler must still recognize the deliberate rebuild.
     },
 
     latched() {

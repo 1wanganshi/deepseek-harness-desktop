@@ -699,36 +699,43 @@ async function createWindow(): Promise<void> {
     harnessViewRecoveryPending = true
     harnessLoader?.clearLoadedUrl()
     const currentUrl = runtime.getState().url
-    if (currentUrl !== null) {
-      harnessMount.schedule('渲染进程已退出', currentUrl)
+    if (currentUrl === null) {
+      // A dying renderer with no known URL is the one case that still needs a
+      // runtime restart, so it goes through the shell-level gate rather than
+      // straight to the controller.
+      void runtimeRestartGate.restart().catch(() => undefined)
       return
     }
-    // A dying renderer with no known URL is the one case that still needs a
-    // runtime restart, so it goes through the shell-level gate rather than
-    // straight to the controller.
-    void runtimeRestartGate.restart().catch(() => undefined)
-  })
-  // A page that stops answering is wedged, not dead: `render-process-gone` and
-  // `did-fail-load` never fire, so without this the user had to restart the whole
-  // app. Reloading the view is the cure — the conversation lives in the runtime,
-  // so only the render is lost.
-  harnessView.webContents.on('unresponsive', () => {
-    const currentUrl = runtime.getState().url
-    void diagnostics.log(`官方 Web UI 渲染进程无响应，尝试重新加载页面（不重启运行时）：${currentUrl ?? '未知地址'}`)
-    if (!rendererRecovery.recover()) {
-      void diagnostics.log('官方 Web UI 渲染进程反复无响应，已暂停自动重载；会话与运行时仍在运行，可通过「重启」恢复')
-      return
-    }
-    harnessViewRecoveryPending = true
-    harnessLoader?.clearLoadedUrl()
-    if (currentUrl !== null) {
-      // Reload the view directly rather than through `harnessMount`: that budget
-      // belongs to a page that never mounted, and an unresponsive reload is a
-      // different failure that must not consume it.
+    if (rendererRecovery.rebuildInFlight()) {
+      // This crash is the deliberate teardown of a wedged renderer. Load the page
+      // straight away: the mount-recovery budget exists for a page that never
+      // mounted, and spending it here would leave a genuinely unmounted page with
+      // no retries left. The unresponsive guard owns its own budget.
+      rendererRecovery.rebuildScheduled()
       void loadHarness(currentUrl)
       return
     }
-    void runtimeRestartGate.restart().catch(() => undefined)
+    harnessMount.schedule('渲染进程已退出', currentUrl)
+  })
+  // A page that stops answering is wedged, not dead: `render-process-gone` and
+  // `did-fail-load` never fire, so without this the user had to restart the whole
+  // app. The conversation lives in the runtime, so only the render is lost.
+  harnessView.webContents.on('unresponsive', () => {
+    void diagnostics.log('官方 Web UI 渲染进程无响应，将重建渲染进程（不重启运行时）')
+    if (!rendererRecovery.recover()) {
+      void diagnostics.log('官方 Web UI 渲染进程反复无响应，已暂停自动重建；会话与运行时仍在运行，可通过「重启」恢复')
+      return
+    }
+    // A plain `reload()`/`loadURL()` cannot rescue this: the renderer is stuck in
+    // a synchronous loop, so it never processes the navigation and the process is
+    // never replaced. Observed in the field as a reload that logs "开始加载" and
+    // then never "加载完成", with the original renderer still pegged at ~100% CPU
+    // half an hour later. Per Electron's own guidance for the `unresponsive`
+    // event, kill the wedged process; `render-process-gone` then performs the
+    // page load in a *new* renderer, so the reload path stays in one place.
+    if (harnessView !== null && !harnessView.webContents.isDestroyed()) {
+      harnessView.webContents.forcefullyCrashRenderer()
+    }
   })
   harnessView.webContents.on('responsive', () => {
     // The renderer answered again, so a reload is no longer needed and the

@@ -58,4 +58,22 @@ describe('renderer unresponsive recovery', () => {
     expect(guard.latched()).toBe(false)
     expect(guard.recover()).toBe(true)
   })
+
+  /**
+   * A wedged renderer never processes a navigation, so the recovery tears the
+   * process down and lets `render-process-gone` load the page in a new one. The
+   * crash handler must be able to tell that deliberate teardown from an ordinary
+   * crash, otherwise it spends the *mount* retry budget that a page which never
+   * mounted still needs.
+   */
+  it('reports a rebuild as in flight until the teardown is observed', () => {
+    const guard = createRendererUnresponsiveRecovery({ maxReloads: 3, windowMs: 60_000, now: () => 0 })
+
+    expect(guard.rebuildInFlight()).toBe(false)
+    expect(guard.recover()).toBe(true)
+    expect(guard.rebuildInFlight()).toBe(true)
+
+    guard.rebuildScheduled()
+    expect(guard.rebuildInFlight()).toBe(false)
+  })
 })
